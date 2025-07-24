@@ -58,32 +58,38 @@
     { name: 'St Joseph', lng: 120.9758, lat: 14.4716 },
   ];
 
-  onMount(() => {
-    window.addEventListener('selectProperty', (e) => {
-      const propertyName = e.detail;
-      const property = propertyFeatures.find(p => p.name === propertyName);
-      if (property) {
-        selectedProperty = property;
-        startNavigationToProperty(property);
-        showSuccess(`Selected property: ${propertyName}`);
-      }
-    });
-    
-    setTimeout(() => {
-      initializeMap();
-    }, 100);
-    
-    return () => {
-      if (map) {
-        map.remove();
-        map = null;
-      }
-      stopTracking();
-      stopNavigation();
-      window.removeEventListener('selectProperty', () => {});
-    };
-  });
-  
+onMount(() => {
+  // Event handler function
+  const handleSelectProperty = (e) => {
+    const propertyName = e.detail;
+    const property = propertyFeatures.find(p => p.name === propertyName);
+    if (property) {
+      selectedProperty = property;
+      startNavigationToProperty(property);
+      showSuccess(`Selected property: ${propertyName}`);
+    }
+  };
+
+  // Add event listener for custom event
+  window.addEventListener('selectProperty', handleSelectProperty);
+
+  // Delay map initialization slightly to ensure DOM is ready
+  const initTimeout = setTimeout(() => {
+    initializeMap();
+  }, 100);
+
+  // Cleanup logic when component is destroyed
+  return () => {
+    if (map) {
+      map.remove();
+      map = null;
+    }
+    stopTracking();
+    stopNavigation();
+    clearTimeout(initTimeout);
+    window.removeEventListener('selectProperty', handleSelectProperty);
+  };
+});
 function initializeMap() {
   if (!mapContainer) return;
 
@@ -146,18 +152,18 @@ map.on('load', async () => {
   isMapLoaded = true;
   map.resize();
 
-  // === Add Vector Source (Mapbox Tileset) ===
+  // 🔹 Add vector tileset source (from Mapbox Studio)
   map.addSource('custom-subdivision', {
     type: 'vector',
-    url: 'mapbox://intellitech.cmdbonx1p42jd1ms8ozhtm3y7-5x3ym'
+    url: 'mapbox://intellitech.cmdhluyzf0ke11ppjkzxr8wmp-74zan' // Replace with your actual tileset ID
   });
 
-  // === Cemetery Paths (LineStrings) Layer ===
+  // 🔹 Add cemetery paths (as LineStrings)
   map.addLayer({
     id: 'cemetery-paths',
     type: 'line',
     source: 'custom-subdivision',
-    'source-layer': 'StartUp',
+    'source-layer': 'subdivision-blocks', // ✅ Use correct source-layer name from your tileset
     paint: {
       'line-color': '#ef4444',
       'line-width': 2,
@@ -166,12 +172,12 @@ map.on('load', async () => {
     filter: ['==', '$type', 'LineString']
   });
 
-  // === Grave Blocks (Polygons) Layer ===
+  // 🔹 Add grave blocks (as Polygons)
   map.addLayer({
     id: 'grave-blocks',
     type: 'fill',
     source: 'custom-subdivision',
-    'source-layer': 'StartUp',
+    'source-layer': 'subdivision-blocks', // ✅ Same source-layer
     paint: {
       'fill-color': '#3b82f6',
       'fill-opacity': 0.6
@@ -179,12 +185,12 @@ map.on('load', async () => {
     filter: ['==', '$type', 'Polygon']
   });
 
-  // === Property Labels (Symbols) Layer ===
+  // 🔹 Add property labels (symbol/text)
   map.addLayer({
     id: 'property-labels',
     type: 'symbol',
     source: 'custom-subdivision',
-    'source-layer': 'StartUp',
+    'source-layer': 'subdivision-blocks',
     layout: {
       'text-field': ['get', 'name'],
       'text-size': 12,
@@ -197,40 +203,40 @@ map.on('load', async () => {
     }
   });
 
-  // === Click Handler for Grave Blocks ===
+  // 🖱️ Handle clicking on grave blocks
   map.on('click', 'grave-blocks', (e) => {
-    const feature = e.features[0];
-    if (feature.properties?.name) {
-      const property = {
-        id: feature.id,
-        name: feature.properties.name,
-        lng: e.lngLat.lng,
-        lat: e.lngLat.lat,
-        feature: feature
-      };
+    const feature = e.features?.[0];
+    const name = feature?.properties?.name;
+    if (!name) return;
 
-      selectedProperty = property;
-      startNavigationToProperty(property);
-      showSuccess(`Selected property: ${property.name}`);
-    }
+    const property = {
+      id: feature.id,
+      name,
+      lng: e.lngLat.lng,
+      lat: e.lngLat.lat,
+      feature
+    };
+
+    selectedProperty = property;
+    startNavigationToProperty(property);
+    showSuccess(`Selected property: ${name}`);
   });
 
-  // === Wait until tiles are rendered then load features
+  // ⏳ After tiles are ready, load additional features
   map.once('idle', () => {
-    setTimeout(() => {
-      loadFeaturesFromMap();
-    }, 2000);
+    setTimeout(loadFeaturesFromMap, 2000);
   });
 
-  // === Map Controls ===
+  // 🧭 Add map navigation controls (zoom, rotate)
   map.addControl(new mapboxgl.NavigationControl(), 'top-right');
 
-  // ✅ Fetch last seen location
+  // 📍 Fetch and display the last seen user location
   fetchLastSeen(userId);
 
-  // ✅ Fetch from /api/adultgraves and render manually (e.g. database polygons)
+  // 🌿 Load and render adult grave areas from server
   try {
     const res = await fetch('/api/adultgraves');
+    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
     const geojson = await res.json();
 
     map.addSource('adultgraves', {
@@ -248,7 +254,6 @@ map.on('load', async () => {
       }
     });
 
-    // Optional: outline
     map.addLayer({
       id: 'adultgraves-outline',
       type: 'line',
@@ -260,7 +265,7 @@ map.on('load', async () => {
     });
 
   } catch (error) {
-    console.error('Failed to fetch adult graves:', error);
+    console.error('❌ Failed to fetch or render /api/adultgraves:', error);
   }
 });
 // fetch last seen geo feature
@@ -318,7 +323,6 @@ async function fetchLastSeen(userId) {
       resizeObserver.observe(mapContainer);
     }
   }
-
   function loadFeaturesFromMap() {
     // Query all polygon features (grave blocks)
     const polygonFeatures = map.queryRenderedFeatures({
