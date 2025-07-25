@@ -232,42 +232,8 @@ map.on('load', async () => {
 
   // 📍 Fetch and display the last seen user location
   fetchLastSeen(userId);
-
-  // 🌿 Load and render adult grave areas from server
-  try {
-    const res = await fetch('/api/adultgraves');
-    if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-    const geojson = await res.json();
-
-    map.addSource('adultgraves', {
-      type: 'geojson',
-      data: geojson
-    });
-
-    map.addLayer({
-      id: 'adultgraves-layer',
-      type: 'fill',
-      source: 'adultgraves',
-      paint: {
-        'fill-color': '#22c55e',
-        'fill-opacity': 0.5
-      }
-    });
-
-    map.addLayer({
-      id: 'adultgraves-outline',
-      type: 'line',
-      source: 'adultgraves',
-      paint: {
-        'line-color': '#15803d',
-        'line-width': 2
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ Failed to fetch or render /api/adultgraves:', error);
-  }
 });
+
 // fetch last seen geo feature
 async function fetchLastSeen(userId) {
   try {
@@ -351,7 +317,7 @@ async function fetchLastSeen(userId) {
     showSuccess(`Loaded ${properties.length} grave blocks`);
   }
 
-  let destinationMarker = null; // declare globally or at top of script
+let destinationMarker = null; // make sure this is declared at top level
 
 async function startNavigationToProperty(property) {
   if (!property || !userLocation) {
@@ -359,61 +325,42 @@ async function startNavigationToProperty(property) {
     return;
   }
 
-  // Stop any existing navigation
-  stopNavigation();
+  const blockName = property.name?.trim();
+  if (!blockName) {
+    showError('Invalid property name.');
+    return;
+  }
 
+  // Update URL to reflect selected property
+  const path = `/api/graves/${encodeURIComponent(blockName)}`;
+  history.pushState(null, '', path);
+
+  // Reset navigation state
+  stopNavigation();
   isLoading = true;
   isNavigating = true;
 
   try {
-    // Set destination pin on the selected property
+    // Remove any existing destination marker
     if (destinationMarker) {
       destinationMarker.remove();
+      destinationMarker = null;
     }
 
+    // Set new destination marker (pink)
     destinationMarker = new mapboxgl.Marker({ color: '#f652a0' })
       .setLngLat([property.lng, property.lat])
       .addTo(map);
 
-    // Check if user is inside cemetery
-    const cemeteryBoundary = getCemeteryBoundary();
-    isInsideCemetery = pointInPolygon(
+    // Get directions route
+    const route = await getMapboxDirections(
       [userLocation.lng, userLocation.lat],
-      cemeteryBoundary
+      [property.lng, property.lat]
     );
 
-    if (isInsideCemetery) {
-      // Navigate using internal paths
-      await navigateUsingInternalPaths(property);
-      currentRoute = {
-        coordinates: selectedLineString.coordinates,
-        distance: calculatePathDistance(selectedLineString.coordinates),
-        steps: createInternalSteps(selectedLineString.coordinates)
-      };
-    } else {
-      // External + internal routing
-      const nearestEntrance = findNearestEntrance();
-      externalRoute = await getMapboxDirections(
-        [userLocation.lng, userLocation.lat],
-        [nearestEntrance.lng, nearestEntrance.lat]
-      );
-
-      await navigateUsingInternalPaths(property);
-
-      currentRoute = {
-        coordinates: [...externalRoute.coordinates, ...selectedLineString.coordinates],
-        distance: externalRoute.distance + calculatePathDistance(selectedLineString.coordinates),
-        steps: [
-          ...externalRoute.steps,
-          { instruction: "Enter cemetery grounds", distance: 0 },
-          ...createInternalSteps(selectedLineString.coordinates)
-        ]
-      };
-    }
-
+    currentRoute = route;
     displayRoute();
     startNavigationUpdates();
-
   } catch (error) {
     console.error('Navigation error:', error);
     showError('Failed to create route: ' + error.message);
@@ -422,9 +369,7 @@ async function startNavigationToProperty(property) {
     isLoading = false;
   }
 }
-
-
-  function getCemeteryBoundary() {
+function getCemeteryBoundary() {
  
     return [
       [120.975, 14.470],
