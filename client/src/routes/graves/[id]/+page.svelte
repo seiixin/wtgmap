@@ -437,11 +437,10 @@ async function startNavigationToProperty(property) {
     showError('Invalid property name.');
     return;
   }
-
-  // ✅ Combine selected block and property name for URL
-  const blockSegment = selectedBlock ? `${selectedBlock}-${propertyName}` : propertyName;
-  const path = `/graves/${encodeURIComponent(blockSegment)}`;
-  history.pushState(null, '', path);
+  
+const blockSegment = selectedBlock || propertyName;
+const path = `/graves/${encodeURIComponent(blockSegment)}`;
+history.pushState(null, '', path);
 
   // Reset navigation state
   stopNavigation();
@@ -1104,7 +1103,6 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
       </button>
     </div>
   </div>
-
         
         <!-- Location Tracking -->
         <div>
