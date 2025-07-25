@@ -1,6 +1,8 @@
 <script>
   import { onMount } from 'svelte';
   import mapboxgl from 'mapbox-gl';
+  import { tick } from 'svelte';
+
   
   // Svelte 5 runes
   let grave;
@@ -29,6 +31,8 @@
   let lineStringFeatures = $state([]);
   let selectedLineString = $state(null);
   let geoJsonData = $state(null);
+  let selectedBlock = '';
+
   
   // Navigation state
   let isNavigating = $state(false);
@@ -59,8 +63,19 @@
     { name: 'St Joseph', lng: 120.9758, lat: 14.4716 },
   ];
 
-onMount(() => {
-  // Event handler for 'selectProperty' custom event
+onMount(async () => {
+  // Extract selected block from URL path
+  const pathSegments = window.location.pathname.split('/');
+  selectedBlock = decodeURIComponent(pathSegments[pathSegments.length - 1]);
+
+  // Attempt preselection (may fail if propertyFeatures not loaded yet)
+  tryPreselectBlock();
+
+  // Wait a tick in case propertyFeatures is async-loaded after mount
+  await tick();
+  const preselectedLater = tryPreselectBlock();
+
+  // Handle external selection via event
   const handleSelectProperty = (e) => {
     const propertyName = e?.detail;
     const property = propertyFeatures.find(p => p.name === propertyName);
@@ -74,15 +89,14 @@ onMount(() => {
     }
   };
 
-  // Register event listener
   window.addEventListener('selectProperty', handleSelectProperty);
 
-  // Initialize the map after a brief delay
+  // Initialize map
   const initTimeout = setTimeout(() => {
     initializeMap();
-  }, 100); // Use requestAnimationFrame if you want to avoid timers
+  }, 100);
 
-  // Cleanup when component is destroyed
+  // Cleanup
   return () => {
     if (map) {
       map.remove();
@@ -95,6 +109,18 @@ onMount(() => {
     window.removeEventListener('selectProperty', handleSelectProperty);
   };
 });
+
+// Try to preselect a block from the URL
+function tryPreselectBlock() {
+  if (selectedBlock && propertyFeatures?.length && !selectedProperty) {
+    const match = propertyFeatures.find(p => p.name === selectedBlock);
+    if (match) {
+      selectedProperty = match;
+      return true;
+    }
+  }
+  return false;
+}
 
 function initializeMap() {
   if (!mapContainer) return;
@@ -402,6 +428,9 @@ history.pushState(null, '', path);
     isLoading = false;
   }
 }
+
+
+
 function getCemeteryBoundary() {
  
     return [
