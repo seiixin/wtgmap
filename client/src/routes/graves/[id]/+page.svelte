@@ -5,9 +5,10 @@
 
   
   // Svelte 5 runes
+  let matchName = $state('');
   let grave;
   let mapContainer = $state();
-    let directionUpdateInterval = $state(null);
+  let directionUpdateInterval = $state(null);
   let map = $state();
   let mapStyle = $state('mapbox://styles/mapbox/streets-v12');
   let markers = $state([]);
@@ -31,7 +32,7 @@
   let lineStringFeatures = $state([]);
   let selectedLineString = $state(null);
   let geoJsonData = $state(null);
-  let selectedBlock = '';
+  let selectedBlock = $state('');
 
   
   // Navigation state
@@ -44,6 +45,9 @@
   let routeProgress = $state(0); // Progress from 0 to 1
     let progressPercentage = $state(0);
   let directDistanceToDestination = $state(0);
+  let matchProperty = $derived(() => 
+  matchName ? propertyFeatures.find((p) => p.name === matchName) : null
+  );
   
 
 
@@ -64,45 +68,64 @@
   ];
 
 onMount(async () => {
-  // Extract selected block from URL path
   const pathSegments = window.location.pathname.split('/');
   selectedBlock = decodeURIComponent(pathSegments[pathSegments.length - 1]);
+  
+  // 🔹 SOLUTION 1: Set matchName immediately when we get selectedBlock from URL
+  if (selectedBlock && selectedBlock !== '' && selectedBlock !== 'map') {
+    matchName = selectedBlock;
+  }
+  
+  // Preselect property based on block name
+  let success = tryPreselectBlock();
+  
+  // Wait a tick if propertyFeatures are loading
+  if (!success) {
+    await tick();
+    success = tryPreselectBlock();
+  }
+  
+  // ✅ If block is found and selected, start tracking and optionally navigate
+  if (success && selectedProperty && !isTracking) {
+    startTracking();
+    if (!isNavigating) {
+      startNavigationToProperty(selectedProperty);
+    }
+  }
 
-  // Attempt preselection (may fail if propertyFeatures not loaded yet)
-  tryPreselectBlock();
-
-  // Wait a tick in case propertyFeatures is async-loaded after mount
-  await tick();
-  const preselectedLater = tryPreselectBlock();
-
-  // Handle external selection via event
   const handleSelectProperty = (e) => {
     const propertyName = e?.detail;
-    const property = propertyFeatures.find(p => p.name === propertyName);
-
-    if (property) {
+    const match = propertyFeatures.find(p => p.name === propertyName);
+    if (match) {
+      const { lng, lat } = extractLngLatFromGeometry(match.geometry);
+      const property = {
+        ...match,
+        lng,
+        lat
+      };
       selectedProperty = property;
+      
+      // 🔹 SOLUTION 2: Update matchName when property is selected
+      matchName = match.name;
+      
       startNavigationToProperty(property);
       showSuccess(`Selected property: ${propertyName}`);
     } else {
       showError('Property not found.');
     }
   };
-
+  
   window.addEventListener('selectProperty', handleSelectProperty);
-
-  // Initialize map
+  
   const initTimeout = setTimeout(() => {
     initializeMap();
   }, 100);
-
-  // Cleanup
+  
   return () => {
     if (map) {
       map.remove();
       map = null;
     }
-
     clearTimeout(initTimeout);
     stopTracking();
     stopNavigation();
@@ -110,21 +133,47 @@ onMount(async () => {
   };
 });
 
-// Try to preselect a block from the URL
-function tryPreselectBlock() {
-  if (selectedBlock && propertyFeatures?.length && !selectedProperty) {
-    const match = propertyFeatures.find(p => p.name === selectedBlock);
-    if (match) {
-      selectedProperty = match;
-      return true;
+function extractLngLatFromGeometry(geometry) {
+  try {
+    const coords = geometry?.coordinates?.[0]?.[0]?.[0]; // MultiPolygon > Polygon > Ring > Point
+    if (coords && coords.length >= 2) {
+      const [lng, lat] = coords;
+      return { lng, lat };
     }
+  } catch (err) {
+    console.error('Failed to extract coordinates from geometry:', err);
+  }
+  return { lng: null, lat: null };
+}
+
+// Try to preselect a block from the URL
+
+// 🔹 SOLUTION 3: Add a function to properly handle block preselection
+function tryPreselectBlock() {
+  if (!selectedBlock || !properties || properties.length === 0) {
+    return false;
+  }
+  
+  const match = properties.find(p => p.name === selectedBlock);
+  if (match) {
+    const { lng, lat } = extractLngLatFromGeometry(match.geometry);
+    selectedProperty = {
+      ...match,
+      lng,
+      lat
+    };
+    
+    // 🔹 CRITICAL: Update matchName here too
+    matchName = match.name;
+    
+    return true;
   }
   return false;
 }
 
 function initializeMap() {
   if (!mapContainer) return;
-
+  
   const style = mapStyle === 'osm'
     ? {
         version: 8,
@@ -148,7 +197,7 @@ function initializeMap() {
         ]
       }
     : mapStyle;
-
+    
   map = new mapboxgl.Map({
     container: mapContainer,
     style: style,
@@ -157,142 +206,138 @@ function initializeMap() {
     attributionControl: true,
     logoPosition: 'bottom-right'
   });
-
+  
   let userId = localStorage.getItem('userId');
   if (!userId) {
     userId = 'user-' + Math.random().toString(36).substring(2, 15);
     localStorage.setItem('userId', userId);
   }
-
+  
   map.addControl(new mapboxgl.NavigationControl(), 'top-right');
-
+  
   const geolocate = new mapboxgl.GeolocateControl({
     positionOptions: { enableHighAccuracy: true },
     trackUserLocation: true,
     showUserLocation: true
   });
   map.addControl(geolocate);
-
+  
   userMarker = new mapboxgl.Marker({ color: '#ef4444', scale: 1.2 })
     .setLngLat([120.9763, 14.4725])
     .addTo(map);
-
+    
   loadFeaturesFromMap();
-// ✅ All layers must be added only after the map loads
-map.on('load', async () => {
-  isMapLoaded = true;
-  map.resize();
 
-  // 🔹 Add vector tileset source (from Mapbox Studio)
-  map.addSource('custom-subdivision', {
-    type: 'vector',
-    url: 'mapbox://intellitech.cmdhluyzf0ke11ppjkzxr8wmp-74zan' 
-  });
-
-  // 🔹 Add cemetery paths (as LineStrings)
-  map.addLayer({
-    id: 'cemetery-paths',
-    type: 'line',
-    source: 'custom-subdivision',
-    'source-layer': 'subdivision-blocks',
-    paint: {
-      'line-color': '#ef4444',
-      'line-width': 2,
-      'line-opacity': 0
-    },
-    filter: ['==', '$type', 'LineString']
-  });
-
-  // 🔹 Add grave blocks (as Polygons)
-  map.addLayer({
-    id: 'grave-blocks',
-    type: 'fill',
-    source: 'custom-subdivision',
-    'source-layer': 'subdivision-blocks',
-    paint: {
-      'fill-color': '#3b82f6',
-      'fill-opacity': 0.6
-    },
-    filter: ['==', '$type', 'Polygon']
-  });
-
-  // 🔹 Add property labels (symbol/text)
-  map.addLayer({
-    id: 'property-labels',
-    type: 'symbol',
-    source: 'custom-subdivision',
-    'source-layer': 'subdivision-blocks',
-    layout: {
-      'text-field': ['get', 'name'],
-      'text-size': 12,
-      'text-allow-overlap': false
-    },
-    paint: {
-      'text-color': '#000000',
-      'text-halo-color': '#ffffff',
-      'text-halo-width': 2
-    }
-  });
-
-  // 🖱️ Handle clicking on grave blocks
-  map.on('click', 'grave-blocks', (e) => {
-    const feature = e.features?.[0];
-    const name = feature?.properties?.name;
-    if (!name) return;
-
-    const property = {
-      id: feature.id,
-      name,
-      lng: e.lngLat.lng,
-      lat: e.lngLat.lat,
-      feature
-    };
-
-    selectedProperty = property;
-    startNavigationToProperty(property);
-    showSuccess(`Selected property: ${name}`);
-  });
-
-  // ⏳ Wait for tiles to load
-  map.once('idle', () => {
-    setTimeout(loadFeaturesFromMap, 2000);
-
-    // 🔍 Find property by name
-    function findPropertyByName(name) {
-      const allFeatures = map.querySourceFeatures('custom-subdivision', {
-        sourceLayer: 'subdivision-blocks'
-      });
-
-      return allFeatures.find(feature => feature.properties.name === name);
-    }
-
-    // 🌐 Read block from URL
-    const params = new URLSearchParams(window.location.search);
-    const block = params.get('block');
-
-    if (block) {
-      const property = findPropertyByName(block);
-      if (property) {
-        const [lng, lat] = property.geometry.coordinates[0][0]; // adjust if needed
-        startNavigationToProperty({
-          id: property.id,
-          name: block,
-          lng,
-          lat,
-          feature: property
-        });
-      } else {
-        console.warn('Block not found:', block);
+  // ✅ All layers must be added only after the map loads
+  map.on('load', async () => {
+    isMapLoaded = true;
+    map.resize();
+    
+    // 🔹 Add vector tileset source (from Mapbox Studio)
+    map.addSource('custom-subdivision', {
+      type: 'vector',
+      url: 'mapbox://intellitech.cmdhluyzf0ke11ppjkzxr8wmp-74zan' 
+    });
+    
+    // 🔹 Add cemetery paths (as LineStrings)
+    map.addLayer({
+      id: 'cemetery-paths',
+      type: 'line',
+      source: 'custom-subdivision',
+      'source-layer': 'subdivision-blocks',
+      paint: {
+        'line-color': '#ef4444',
+        'line-width': 2,
+        'line-opacity': 0
+      },
+      filter: ['==', '$type', 'LineString']
+    });
+    
+    // 🔹 Add grave blocks (as Polygons)
+    map.addLayer({
+      id: 'grave-blocks',
+      type: 'fill',
+      source: 'custom-subdivision',
+      'source-layer': 'subdivision-blocks',
+      paint: {
+        'fill-color': '#3b82f6',
+        'fill-opacity': 0.6
+      },
+      filter: ['==', '$type', 'Polygon']
+    });
+    
+    // 🔹 Add property labels (symbol/text)
+    map.addLayer({
+      id: 'property-labels',
+      type: 'symbol',
+      source: 'custom-subdivision',
+      'source-layer': 'subdivision-blocks',
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-size': 12,
+        'text-allow-overlap': false
+      },
+      paint: {
+        'text-color': '#000000',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 2
       }
-    }
+    });
+    
+    // 🖱️ Handle clicking on grave blocks
+    map.on('click', 'grave-blocks', (e) => {
+      const feature = e.features?.[0];
+      const name = feature?.properties?.name;
+      if (!name) return;
+      
+      const property = {
+        id: feature.id,
+        name,
+        lng: e.lngLat.lng,
+        lat: e.lngLat.lat,
+        feature
+      };
+      
+      selectedProperty = property;
+      
+      // 🔹 SOLUTION 4: Update matchName when clicking on map
+      matchName = name;
+      
+      startNavigationToProperty(property);
+      showSuccess(`Selected property: ${name}`);
+    });
+    
+    // ⏳ Wait for tiles to load
+    map.once('idle', () => {
+      setTimeout(() => {
+        loadFeaturesFromMap();
+        
+        // 🔹 SOLUTION 5: Try to preselect again after map data loads
+        if (selectedBlock && properties.length > 0) {
+          const match = properties.find(p => p.name === selectedBlock);
+          if (match) {
+            const { lng, lat } = extractLngLatFromGeometry(match.geometry);
+            selectedProperty = {
+              ...match,
+              lng,
+              lat
+            };
+            matchName = match.name; // Update matchName here too
+            
+            // Navigate to the property
+            if (!isNavigating) {
+              startNavigationToProperty(selectedProperty);
+            }
+          }
+        }
+      }, 2000);
+    });
+    
+    // 📍 Last seen
+    fetchLastSeen(userId);
   });
 
-  // 🧭 Controls
-  map.addControl(new mapboxgl.NavigationControl(), 'top-right');
-
-  // 📍 Last seen
-  fetchLastSeen(userId);
-});
+selectedProperty = match;
 
 // fetch last seen geo feature
 async function fetchLastSeen(userId) {
@@ -348,7 +393,9 @@ async function fetchLastSeen(userId) {
     if (mapContainer) {
       resizeObserver.observe(mapContainer);
     }
+    
   }
+
   function loadFeaturesFromMap() {
     // Query all polygon features (grave blocks)
     const polygonFeatures = map.queryRenderedFeatures({
@@ -385,14 +432,16 @@ async function startNavigationToProperty(property) {
     return;
   }
 
-  const blockName = property.name?.trim();
-  if (!blockName) {
+  const propertyName = property.name?.trim();
+  if (!propertyName) {
     showError('Invalid property name.');
     return;
   }
-// ✅ Set the URL to use dynamic route instead of query param
-const path = `/graves/${encodeURIComponent(blockName)}`;
-history.pushState(null, '', path);
+
+  // ✅ Combine selected block and property name for URL
+  const blockSegment = selectedBlock ? `${selectedBlock}-${propertyName}` : propertyName;
+  const path = `/graves/${encodeURIComponent(blockSegment)}`;
+  history.pushState(null, '', path);
 
   // Reset navigation state
   stopNavigation();
@@ -400,18 +449,18 @@ history.pushState(null, '', path);
   isNavigating = true;
 
   try {
-    // Remove any existing destination marker
+    // Remove old destination marker if any
     if (destinationMarker) {
       destinationMarker.remove();
       destinationMarker = null;
     }
 
-    // Set new destination marker (pink)
+    // Place a new pink marker
     destinationMarker = new mapboxgl.Marker({ color: '#f652a0' })
       .setLngLat([property.lng, property.lat])
       .addTo(map);
 
-    // Get directions route
+    // Fetch and draw the route
     const route = await getMapboxDirections(
       [userLocation.lng, userLocation.lat],
       [property.lng, property.lat]
@@ -428,7 +477,6 @@ history.pushState(null, '', path);
     isLoading = false;
   }
 }
-
 
 
 function getCemeteryBoundary() {
@@ -941,6 +989,8 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
       changeMapStyle(mapStyle);
     }
   });
+
+  
 </script>
 
 <svelte:head>
@@ -994,47 +1044,67 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
             {/each}
           </select>
         </div>
+<!-- 🔘 Grave Block Selection -->
+<div class="mt-4">
+  <label class="block text-sm font-semibold text-gray-700 mb-2">
+    Select Other Grave Block
+  </label>
 
-        <!-- Property Selection -->
-        <div>
-          <label class="block text-sm font-semibold text-gray-700 mb-2">
-            Select Grave Block
-          </label>
-          <select 
-            bind:value={selectedProperty}
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-          >
-            <option value={null}>Choose a grave block</option>
-            {#each properties as property (property.id)}
-              <option value={property}>{property.name}</option>
-            {/each}
-          </select>
-        </div>
-        
-        <!-- Navigation Controls -->
-        <div>
-          <label class="block text-sm font-semibold text-gray-700 mb-2">
-            Navigation
-          </label>
-          <div class="flex flex-col gap-2">
-            <button
-              onclick={() => startNavigationToProperty(selectedProperty)}
-              disabled={isLoading || !selectedProperty}
-              class="w-full px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              {isLoading ? 'Calculating route...' : 'Navigate'}
-            </button>
-            <button
-              onclick={stopNavigation}
-              disabled={!isNavigating}
-              class="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Stop Navigation
-            </button>
-          </div>
+  <select
+    bind:value={selectedProperty}
+    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+  >
+    <option value={null}>Choose a grave block</option>
+    {#each properties as property (property.id)}
+      <option value={property}>{property.name}</option>
+    {/each}
+  </select>
+</div>
+
+<!-- 🔍 Preview Selected Grave Block -->
+<div class="mt-4">
+  <label class="block text-sm font-semibold text-gray-700 mb-2">
+    Selected Grave Block:
+  </label>
+
+  <input
+    type="text"
+    readonly
+    class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-700"
+  value={
+    matchName
+      ? `${matchName}`
+      : selectedProperty?.name
+      ? `${selectedProperty.name}`
+      : 'No block selected'
+  }
+  />
+</div>
 
 
-        </div>
+  <!-- Navigation Controls -->
+  <div>
+    <label class="block text-sm font-semibold text-gray-700 mb-2">
+      Navigation
+    </label>
+    <div class="flex flex-col gap-2">
+      <button
+        onclick={() => startNavigationToProperty(selectedProperty)}
+        disabled={isLoading || !selectedProperty}
+        class="w-full px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        {isLoading ? 'Calculating route...' : 'Navigate'}
+      </button>
+      <button
+        onclick={stopNavigation}
+        disabled={!isNavigating}
+        class="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >
+        Stop Navigation
+      </button>
+    </div>
+  </div>
+
         
         <!-- Location Tracking -->
         <div>
