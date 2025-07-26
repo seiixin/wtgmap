@@ -1046,6 +1046,7 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
       selectedProperty = properties.find(p => p.name.toLowerCase().includes(val)) ?? null;
     }}
   />
+
   <!-- Block Selection -->
 <div class="w-full">
   <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
@@ -1080,6 +1081,15 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
         >
           {isLoading ? 'Calculating route...' : 'Navigate'}
         </button>
+                  <!-- Location Tracking -->
+        <div>
+          <button
+            onclick={toggleTracking}
+            class="w-full px-3 py-2 text-sm rounded-lg transition-colors duration-200 {isTracking ? 'bg-green-500 hover:bg-green-600 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'}"
+          >
+            {isTracking ? 'Stop Tracking' : 'Start Tracking'}
+          </button>
+        </div>
 
 
       <!-- Distance Remaining (Compact) -->
