@@ -991,158 +991,135 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
 
   
 </script>
-
 <svelte:head>
-  <link href='https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css' rel='stylesheet' />
-  <script src='https://unpkg.com/@turf/turf@6/turf.min.js'></script>
+  <link href="https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css" rel="stylesheet" />
+  <script src="https://unpkg.com/@turf/turf@6/turf.min.js"></script>
 </svelte:head>
 
 <main class="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
   <div class="max-w-7xl mx-auto">
-    <!-- Header -->
-    <div class="bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-t-xl p-6 shadow-lg">
-      <h1 class="text-3xl font-bold text-center">Walk To Grave</h1>
-      <p class="text-center mt-2 opacity-90">Navigate to grave blocks with real-time location</p>
-    </div>
-    
-    <!-- Messages -->
+
+    <!-- 🔷 Header -->
+    <header class="bg-gradient-to-r from-blue-600 to-purple-600 text-white rounded-t-xl p-6 shadow-lg text-center">
+      <h1 class="text-3xl font-bold">Walk To Grave</h1>
+      <p class="mt-2 opacity-90">Navigate to grave blocks with real-time location</p>
+    </header>
+
+    <!-- 🔔 Status Messages -->
     {#if errorMessage}
-      <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-4" role="alert">
-        <div class="flex">
-          <div class="ml-3">
-            <p class="text-sm">{errorMessage}</p>
-          </div>
-        </div>
+      <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 my-4" role="alert">
+        <p class="text-sm">{errorMessage}</p>
       </div>
     {/if}
-    
+
     {#if successMessage}
-      <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mb-4" role="alert">
-        <div class="flex">
-          <div class="ml-3">
-            <p class="text-sm">{successMessage}</p>
-          </div>
-        </div>
+      <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 my-4" role="alert">
+        <p class="text-sm">{successMessage}</p>
       </div>
     {/if}
-    
-    <!-- Controls -->
-    <div class="bg-white p-6 border-x border-gray-200 shadow-sm">
-      <div class="grid grid-cols-1 lg:grid-cols-4 gap-4">
-        <!-- Map Style Selection -->
-        <div>
-          <label class="block text-sm font-semibold text-gray-700 mb-2">
-            Map Style
-          </label>
-          <select 
-            bind:value={mapStyle}
-            class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-          >
-            {#each mapStyles as style}
-              <option value={style.value}>{style.label}</option>
-            {/each}
-          </select>
-        </div>
-<!-- 🔍 Grave Block Search -->
-<div class="mt-4">
-  <label class="block text-sm font-semibold text-gray-700 mb-2">
+
+    <!-- ⚙️ Controls Section -->
+    <section class="bg-white p-6 border-x border-gray-200 shadow-sm grid grid-cols-1 lg:grid-cols-4 gap-6">
+
+      <!-- Map Style -->
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-2">Map Style</label>
+        <select bind:value={mapStyle} class="w-full px-3 py-2 border rounded-lg focus:ring-2 focus:ring-blue-500">
+          {#each mapStyles as style}
+            <option value={style.value}>{style.label}</option>
+          {/each}
+        </select>
+      </div>
+
+<!-- Grave Block Search -->
+<div>
+  <label class="block text-sm font-semibold text-gray-700 mb-1">
+    🔍Looking for :
+    <span class="ml-1 font-normal text-gray-600">
+      {matchName || selectedProperty?.name || 'No block selected'} ?
+    </span>
+  </label>
+
+  <label for="search" class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
     Search Grave Block
   </label>
-
-<input
-  type="text"
-  class="w-full px-3 py-2 border border-gray-300 rounded-lg"
-  placeholder="Type grave block name..."
-  oninput={(e) => {
-    const val = e.target.value.trim().toLowerCase();
-    selectedProperty = properties.find(
-      (p) => p.name.toLowerCase().includes(val)
-    ) ?? null;
-  }}
-/>
-
-
-  {#if selectedProperty}
-    <p class="mt-4 text-sm text-gray-700">
-      ✅ Selected Grave Block: <strong>{selectedProperty.name}</strong>
-    </p>
-  {/if}
-</div>
-
-<!-- 🔍 Preview Selected Grave Block -->
-<div class="mt-4">
-  <label class="block text-sm font-semibold text-gray-700 mb-2">
-    Selected Grave Block:
-  </label>
-
   <input
+    id="search"
     type="text"
-    readonly
-    class="w-full px-3 py-2 border border-gray-300 rounded-lg bg-gray-100 text-gray-700"
-  value={
-    matchName
-      ? `${matchName}`
-      : selectedProperty?.name
-      ? `${selectedProperty.name}`
-      : 'No block selected'
-  }
+    placeholder="Type grave block name..."
+    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+    oninput={(e) => {
+      const val = e.target.value.trim().toLowerCase();
+      selectedProperty = properties.find(p => p.name.toLowerCase().includes(val)) ?? null;
+    }}
   />
 </div>
 
-  <!-- Navigation Controls -->
-  <div>
-    <label class="block text-sm font-semibold text-gray-700 mb-2">
-      Navigation
-    </label>
-    <div class="flex flex-col gap-2">
-      <button
-        onclick={() => startNavigationToProperty(selectedProperty)}
-        disabled={isLoading || !selectedProperty}
-        class="w-full px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-      >
-        {isLoading ? 'Calculating route...' : 'Navigate'}
-      </button>
-      <button
-        onclick={stopNavigation}
-        disabled={!isNavigating}
-        class="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-      >
-        Stop Navigation
-      </button>
-    </div>
-  </div>
-        
-        <!-- Location Tracking -->
-        <div>
-          <label class="block text-sm font-semibold text-gray-700 mb-2">
-            Location Tracking
-          </label>
-          <button
-            onclick={toggleTracking}
-            class="w-full px-3 py-2 text-sm rounded-lg transition-colors duration-200 {isTracking ? 'bg-green-500 hover:bg-green-600 text-white' : 'bg-blue-500 hover:bg-blue-600 text-white'}"
-          >
-            {isTracking ? 'Stop Tracking' : 'Start Tracking'}
-          </button>
-        </div>
+<!-- Block Selection -->
+<div class="w-full">
+  <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
+    List of Grave Block
+  </label>
+  <select
+    bind:value={selectedProperty}
+    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+  >
+    <option value={null}>Select a block</option>
+    {#each properties as property (property.id)}
+      <option value={property}>{property.name}</option>
+    {/each}
+  </select>
+</div>
 
-        <div class="bg-gray-50 p-3 rounded-lg">
-      <h3 class="font-semibold text-gray-700 mb-1">Distance Remaining</h3>
-      <p class="text-gray-600">
-        {distanceToDestination ? `${(distanceToDestination).toFixed(0)} meters` : 'Not navigating'}
-      </p>
-    </div>
 
+<!-- Selected Block Preview -->
+
+
+
+
+      <!-- Navigation Controls -->
+      <div class="col-span-1 lg:col-span-2 flex flex-col gap-2">
+        <label class="block text-sm font-semibold text-gray-700">Navigation</label>
+        <button
+          onclick={() => startNavigationToProperty(selectedProperty)}
+          disabled={isLoading || !selectedProperty}
+          class="w-full px-3 py-2 bg-purple-500 hover:bg-purple-600 text-white text-sm rounded-lg transition disabled:opacity-50"
+        >
+          {isLoading ? 'Calculating route...' : 'Navigate'}
+        </button>
+        <button
+          onclick={stopNavigation}
+          disabled={!isNavigating}
+          class="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg transition disabled:opacity-50"
+        >
+          Stop Navigation
+        </button>
       </div>
-    </div>
-    
-    <!-- Map Container -->
-    <div class="relative bg-white border-x border-gray-200">
-      <div 
-        bind:this={mapContainer}
-        class="w-full h-[500px] lg:h-[600px]"
-        style="min-height: 400px;"
-      ></div>
-      
+
+      <!-- Location Tracking -->
+      <div>
+        <label class="block text-sm font-semibold text-gray-700 mb-2">Location Tracking</label>
+        <button
+          onclick={toggleTracking}
+          class="w-full px-3 py-2 text-sm rounded-lg text-white transition {isTracking ? 'bg-green-500 hover:bg-green-600' : 'bg-blue-500 hover:bg-blue-600'}"
+        >
+          {isTracking ? 'Stop Tracking' : 'Start Tracking'}
+        </button>
+      </div>
+
+      <!-- Distance Remaining (Compact) -->
+      <div class="bg-gray-50 p-3 rounded-lg">
+        <h3 class="font-semibold text-gray-700 mb-1">Distance Remaining</h3>
+        <p class="text-gray-600">
+          {distanceToDestination ? `${distanceToDestination.toFixed(0)} meters` : 'Not navigating'}
+        </p>
+      </div>
+    </section>
+
+    <!-- 🗺️ Map Display -->
+    <section class="relative bg-white border-x border-gray-200 my-6">
+      <div bind:this={mapContainer} class="w-full h-[500px] lg:h-[600px]"></div>
+
       {#if !map}
         <div class="absolute inset-0 bg-gray-100 flex items-center justify-center">
           <div class="text-center">
@@ -1151,64 +1128,60 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
           </div>
         </div>
       {/if}
-    </div>
-    
-    <!-- Info Panel -->
-    <div class="bg-white p-6 rounded-b-xl border-x border-b border-gray-200 shadow-lg">
+    </section>
+
+    <!-- 📊 Info Panel -->
+    <section class="bg-white p-6 rounded-b-xl border-x border-b border-gray-200 shadow-lg">
       <div class="grid grid-cols-1 md:grid-cols-4 gap-4 text-sm">
         <div class="bg-gray-50 p-3 rounded-lg">
           <h3 class="font-semibold text-gray-700 mb-1">Selected Grave Block</h3>
-          <p class="text-gray-600">
-            {selectedProperty?.name || 'None selected'}
-          </p>
+          <p class="text-gray-600">{selectedProperty?.name || 'None selected'}</p>
         </div>
-        
+
         <div class="bg-gray-50 p-3 rounded-lg">
           <h3 class="font-semibold text-gray-700 mb-1">Navigation Status</h3>
-          <p class="text-sm font-medium {isNavigating ? 'text-green-600' : 'text-red-600'}">
+          <p class="font-medium {isNavigating ? 'text-green-600' : 'text-red-600'}">
             {isNavigating ? 'Active' : 'Inactive'}
           </p>
         </div>
-        
+
         <div class="bg-gray-50 p-3 rounded-lg">
           <h3 class="font-semibold text-gray-700 mb-1">Current Step</h3>
-          <p class="text-gray-600">
-            {currentStep || 'Not navigating'}
-          </p>
+          <p class="text-gray-600">{currentStep || 'Not navigating'}</p>
         </div>
 
         <div class="bg-gray-50 p-3 rounded-lg">
           <h3 class="font-semibold text-gray-700 mb-1">Distance Remaining</h3>
           <p class="text-gray-600">
-            {distanceToDestination ? `${(distanceToDestination).toFixed(0)} meters` : 'Not navigating'}
+            {distanceToDestination ? `${distanceToDestination.toFixed(0)} meters` : 'Not navigating'}
           </p>
         </div>
       </div>
-    </div>
+    </section>
   </div>
 </main>
 
 <style>
   @import 'https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css';
-  
+
   :global(.mapboxgl-popup-content) {
     border-radius: 0.75rem;
     box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 10px 10px -5px rgb(0 0 0 / 0.04);
     padding: 0;
     max-width: 300px;
   }
-  
+
   :global(.mapboxgl-popup-close-button) {
     color: rgb(107 114 128);
     font-size: 18px;
     padding: 8px;
   }
-  
+
   :global(.mapboxgl-popup-close-button:hover) {
     color: rgb(55 65 81);
     background-color: rgb(243 244 246);
   }
-  
+
   :global(.mapboxgl-popup-tip) {
     border-top-color: white;
   }
