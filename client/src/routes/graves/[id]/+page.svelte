@@ -871,60 +871,196 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
     successMessage = message;
     setTimeout(() => successMessage = null, 5000);
   }
-
-  function startTracking() {
-    if (!navigator.geolocation) {
-      showError('Geolocation is not supported by this browser');
-      return;
-    }
-
-    const options = {
-      enableHighAccuracy: true,
-      timeout: 10000,
-      maximumAge: 1000
-    };
-
-    userLocationWatchId = navigator.geolocation.watchPosition(
-      (position) => {
-        const newLocation = {
-          lng: position.coords.longitude,
-          lat: position.coords.latitude,
-          accuracy: position.coords.accuracy
-        };
-        
-        userLocation = newLocation;
-        
-        // Update user marker
-        if (userMarker) {
-          userMarker.setLngLat([newLocation.lng, newLocation.lat]);
-        } else {
-          userMarker = new mapboxgl.Marker({ 
-            color: '#ef4444',
-            scale: 1.2
-          })
-            .setLngLat([newLocation.lng, newLocation.lat])
-            .addTo(map);
-        }
-        
-        // If navigating, check if we've reached the cemetery
-        if (isNavigating && !isInsideCemetery) {
-          const cemeteryBoundary = getCemeteryBoundary();
-          if (pointInPolygon([newLocation.lng, newLocation.lat], cemeteryBoundary)) {
-            isInsideCemetery = true;
-            showSuccess("Entered cemetery grounds - switching to internal navigation");
-          }
-        }
-      },
-      (error) => {
-        console.error('Geolocation error:', error);
-        showError('Error getting location: ' + error.message);
-      },
-      options
-    );
-    
-    isTracking = true;
-    showSuccess('Location tracking started');
+/////////////////////////// TRACKING FUNCTION ///////////////////
+async function startTracking() {
+  // 🔹 1. Check if geolocation is supported
+  if (!navigator.geolocation) {
+    showError('Geolocation is not supported by this browser');
+    return;
   }
+
+  // 🔹 2. Request permission first (especially important for mobile)
+  try {
+    if ('permissions' in navigator) {
+      const permission = await navigator.permissions.query({ name: 'geolocation' });
+      console.log('Geolocation permission:', permission.state);
+      
+      if (permission.state === 'denied') {
+        showError('Location permission denied. Please enable location access in your browser settings.');
+        return;
+      }
+    }
+  } catch (error) {
+    console.log('Permission API not supported, continuing with geolocation request');
+  }
+
+  // 🔹 3. Mobile-optimized options
+  const options = {
+    enableHighAccuracy: true, // Use GPS if available
+    timeout: 15000, // Increased timeout for mobile (15 seconds)
+    maximumAge: 5000 // Allow 5-second old location
+  };
+
+  // 🔹 4. First, get current position to test if location works
+  try {
+    const position = await new Promise((resolve, reject) => {
+      navigator.geolocation.getCurrentPosition(resolve, reject, options);
+    });
+    
+    console.log('Initial location obtained:', position.coords);
+    showSuccess('Location access granted!');
+  } catch (error) {
+    console.error('Initial geolocation failed:', error);
+    handleGeolocationError(error);
+    return;
+  }
+
+  // 🔹 5. Start watching position
+  userLocationWatchId = navigator.geolocation.watchPosition(
+    (position) => {
+      const newLocation = {
+        lng: position.coords.longitude,
+        lat: position.coords.latitude,
+        accuracy: position.coords.accuracy,
+        timestamp: position.timestamp
+      };
+      
+      console.log('Location update:', newLocation);
+      userLocation = newLocation;
+      
+      // Update user marker
+      if (userMarker) {
+        userMarker.setLngLat([newLocation.lng, newLocation.lat]);
+      } else {
+        userMarker = new mapboxgl.Marker({ 
+          color: '#ef4444',
+          scale: 1.2
+        })
+          .setLngLat([newLocation.lng, newLocation.lat])
+          .addTo(map);
+      }
+      
+      // Center map on user location (first time only)
+      if (!hasInitialLocationSet) {
+        map.flyTo({
+          center: [newLocation.lng, newLocation.lat],
+          zoom: 16
+        });
+        hasInitialLocationSet = true;
+      }
+      
+      // If navigating, check if we've reached the cemetery
+      if (isNavigating && !isInsideCemetery) {
+        const cemeteryBoundary = getCemeteryBoundary();
+        if (pointInPolygon([newLocation.lng, newLocation.lat], cemeteryBoundary)) {
+          isInsideCemetery = true;
+          showSuccess("Entered cemetery grounds - switching to internal navigation");
+        }
+      }
+    },
+    (error) => {
+      console.error('Geolocation watch error:', error);
+      handleGeolocationError(error);
+    },
+    options
+  );
+  
+  isTracking = true;
+  showSuccess('Location tracking started');
+}
+
+// 🔹 6. Better error handling for mobile
+function handleGeolocationError(error) {
+  let errorMessage = '';
+  
+  switch (error.code) {
+    case error.PERMISSION_DENIED:
+      errorMessage = "Location access denied. Please:\n\n" +
+                    "1. Enable location services on your device\n" +
+                    "2. Allow location access for this website\n" +
+                    "3. Refresh the page and try again";
+      break;
+    case error.POSITION_UNAVAILABLE:
+      errorMessage = "Location unavailable. Please:\n\n" +
+                    "1. Make sure you're outdoors or near a window\n" +
+                    "2. Check if location services are enabled\n" +
+                    "3. Try again in a few moments";
+      break;
+    case error.TIMEOUT:
+      errorMessage = "Location request timed out. Please:\n\n" +
+                    "1. Make sure you have good GPS signal\n" +
+                    "2. Try moving to an open area\n" +
+                    "3. Refresh and try again";
+      break;
+    default:
+      errorMessage = "Unknown location error occurred. Please refresh and try again.";
+      break;
+  }
+  
+  showError(errorMessage);
+}
+
+// 🔹 7. Add initial location flag
+let hasInitialLocationSet = false;
+
+// 🔹 8. Enhanced permission request function (call this on button click)
+async function requestLocationPermission() {
+  try {
+    showSuccess('Requesting location permission...');
+    
+    // Try to get location - this will trigger the permission prompt
+    const position = await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        reject(new Error('Location request timed out'));
+      }, 10000);
+      
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          clearTimeout(timeout);
+          resolve(pos);
+        },
+        (err) => {
+          clearTimeout(timeout);
+          reject(err);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 8000,
+          maximumAge: 10000
+        }
+      );
+    });
+    
+    showSuccess('Location permission granted!');
+    return true;
+  } catch (error) {
+    handleGeolocationError(error);
+    return false;
+  }
+}
+
+// 🔹 9. Check if we're on HTTPS (required for geolocation on mobile)
+function checkHTTPS() {
+  if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    showError('Location services require HTTPS. Please use a secure connection.');
+    return false;
+  }
+  return true;
+}
+
+// 🔹 10. Initialize with proper checks
+function initializeLocationServices() {
+  if (!checkHTTPS()) return;
+  
+  // Request permission first, then start tracking
+  requestLocationPermission().then(success => {
+    if (success) {
+      startTracking();
+    }
+  });
+}
+/////////////////////////////////////// TRACKING FUNCTION END //////////////////////
+
 
   function stopTracking() {
     if (userLocationWatchId) {
