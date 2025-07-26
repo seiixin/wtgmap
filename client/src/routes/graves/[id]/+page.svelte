@@ -1043,21 +1043,30 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
             {/each}
           </select>
         </div>
-<!-- 🔘 Grave Block Selection -->
+<!-- 🔍 Grave Block Search -->
 <div class="mt-4">
   <label class="block text-sm font-semibold text-gray-700 mb-2">
-    Select Other Grave Block
+    Search Grave Block
   </label>
 
-  <select
-    bind:value={selectedProperty}
-    class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-  >
-    <option value={null}>Choose a grave block</option>
-    {#each properties as property (property.id)}
-      <option value={property}>{property.name}</option>
-    {/each}
-  </select>
+<input
+  type="text"
+  class="w-full px-3 py-2 border border-gray-300 rounded-lg"
+  placeholder="Type grave block name..."
+  oninput={(e) => {
+    const val = e.target.value.trim().toLowerCase();
+    selectedProperty = properties.find(
+      (p) => p.name.toLowerCase().includes(val)
+    ) ?? null;
+  }}
+/>
+
+
+  {#if selectedProperty}
+    <p class="mt-4 text-sm text-gray-700">
+      ✅ Selected Grave Block: <strong>{selectedProperty.name}</strong>
+    </p>
+  {/if}
 </div>
 
 <!-- 🔍 Preview Selected Grave Block -->
@@ -1079,7 +1088,6 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
   }
   />
 </div>
-
 
   <!-- Navigation Controls -->
   <div>
