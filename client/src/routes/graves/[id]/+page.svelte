@@ -66,73 +66,66 @@
   const locations = [
     { name: 'St Joseph', lng: 120.9758, lat: 14.4716 },
   ];
-
 onMount(async () => {
   const pathSegments = window.location.pathname.split('/');
   selectedBlock = decodeURIComponent(pathSegments[pathSegments.length - 1]);
-  
-  // 🔹 SOLUTION 1: Set matchName immediately when we get selectedBlock from URL
+
+  // 🔹 Set matchName immediately
   if (selectedBlock && selectedBlock !== '' && selectedBlock !== 'map') {
     matchName = selectedBlock;
   }
-  
+
   // Preselect property based on block name
   let success = tryPreselectBlock();
-  
-  // Wait a tick if propertyFeatures are loading
+
   if (!success) {
     await tick();
     success = tryPreselectBlock();
   }
-  
-  // ✅ If block is found and selected, start tracking and optionally navigate
-  if (success && selectedProperty && !isTracking) {
-    startTracking();
-    if (!isNavigating) {
-      startNavigationToProperty(selectedProperty);
-    }
+
+  // ✅ Automatically start tracking once component mounts
+  startTracking();
+
+  // ✅ If block matched, auto-navigate
+  if (success && selectedProperty && !isNavigating) {
+    startNavigationToProperty(selectedProperty);
   }
 
+  // Event listener for manual property selection
   const handleSelectProperty = (e) => {
     const propertyName = e?.detail;
     const match = propertyFeatures.find(p => p.name === propertyName);
     if (match) {
       const { lng, lat } = extractLngLatFromGeometry(match.geometry);
-      const property = {
-        ...match,
-        lng,
-        lat
-      };
-      selectedProperty = property;
-      
-      // 🔹 SOLUTION 2: Update matchName when property is selected
+      selectedProperty = { ...match, lng, lat };
       matchName = match.name;
-      
-      startNavigationToProperty(property);
+      startNavigationToProperty(selectedProperty);
       showSuccess(`Selected property: ${propertyName}`);
     } else {
       showError('Property not found.');
     }
   };
-  
+
   window.addEventListener('selectProperty', handleSelectProperty);
-  
+
   const initTimeout = setTimeout(() => {
     initializeMap();
   }, 100);
-  
+
   return () => {
     if (map) {
       map.remove();
       map = null;
     }
     clearTimeout(initTimeout);
-    stopTracking();
+
+    // ❌ Remove this if `stopTracking()` is deleted
+    // stopTracking();
+
     stopNavigation();
     window.removeEventListener('selectProperty', handleSelectProperty);
   };
 });
-
 function extractLngLatFromGeometry(geometry) {
   try {
     const coords = geometry?.coordinates?.[0]?.[0]?.[0]; // MultiPolygon > Polygon > Ring > Point
@@ -1053,9 +1046,7 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
       selectedProperty = properties.find(p => p.name.toLowerCase().includes(val)) ?? null;
     }}
   />
-</div>
-
-<!-- Block Selection -->
+  <!-- Block Selection -->
 <div class="w-full">
   <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
     List of Grave Block
@@ -1071,6 +1062,9 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
   </select>
 </div>
 
+</div>
+
+
 
 <!-- Selected Block Preview -->
 
@@ -1079,7 +1073,6 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
 
       <!-- Navigation Controls -->
       <div class="col-span-1 lg:col-span-2 flex flex-col gap-2">
-        <label class="block text-sm font-semibold text-gray-700">Navigation</label>
         <button
           onclick={() => startNavigationToProperty(selectedProperty)}
           disabled={isLoading || !selectedProperty}
@@ -1087,25 +1080,7 @@ function nearestPointOnSegment(point, segmentStart, segmentEnd) {
         >
           {isLoading ? 'Calculating route...' : 'Navigate'}
         </button>
-        <button
-          onclick={stopNavigation}
-          disabled={!isNavigating}
-          class="w-full px-3 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-lg transition disabled:opacity-50"
-        >
-          Stop Navigation
-        </button>
-      </div>
 
-      <!-- Location Tracking -->
-      <div>
-        <label class="block text-sm font-semibold text-gray-700 mb-2">Location Tracking</label>
-        <button
-          onclick={toggleTracking}
-          class="w-full px-3 py-2 text-sm rounded-lg text-white transition {isTracking ? 'bg-green-500 hover:bg-green-600' : 'bg-blue-500 hover:bg-blue-600'}"
-        >
-          {isTracking ? 'Stop Tracking' : 'Start Tracking'}
-        </button>
-      </div>
 
       <!-- Distance Remaining (Compact) -->
       <div class="bg-gray-50 p-3 rounded-lg">
