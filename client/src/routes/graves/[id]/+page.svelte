@@ -229,7 +229,7 @@ function initializeMap() {
     // 🔹 Add vector tileset source (from Mapbox Studio)
     map.addSource('custom-subdivision', {
       type: 'vector',
-      url: 'mapbox://intellitech.cmdhluyzf0ke11ppjkzxr8wmp-74zan' 
+      url: 'mapbox://intellitech.cmdlhcoi904ju1omotwfpqufh-5rvai' 
     });
     
     // 🔹 Add cemetery paths (as LineStrings)
@@ -1175,7 +1175,7 @@ function initializeLocationServices() {
   <input
     id="search"
     type="text"
-    placeholder="Type grave block name..."
+    placeholder="{matchName || selectedProperty?.name || 'No block selected'}"
     class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
     oninput={(e) => {
       const val = e.target.value.trim().toLowerCase();
