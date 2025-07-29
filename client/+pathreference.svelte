@@ -308,7 +308,6 @@
     
     displayRoute();
     startNavigationUpdates();
-
     
   } catch (error) {
     console.error('Navigation error:', error);
