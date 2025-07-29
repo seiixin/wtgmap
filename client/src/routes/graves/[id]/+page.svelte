@@ -470,6 +470,24 @@ function findNearestPointOnLine(targetPoint, lineCoordinates) {
   };
 }
 
+  function handleSearchInput(e) {
+    const val = e.target.value.trim();
+    matchName = val;
+    
+    // Auto-select if exact match found in locator-blocks
+    const exactMatch = properties.find(p => 
+      p.name.toLowerCase() === val.toLowerCase()
+    );
+    
+    if (exactMatch) {
+      selectedProperty = exactMatch;
+      // Update URL when exact match found
+      const path = `/graves/${encodeURIComponent(exactMatch.name)}`;
+      history.pushState(null, '', path);
+    }
+  }
+
+
 async function startNavigationToProperty(property) {
   if (!property || !userLocation) {
     showError('Please enable location tracking and select a property');
