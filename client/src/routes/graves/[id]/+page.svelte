@@ -44,6 +44,7 @@
   let progressPercentage = $state(0);
   let directDistanceToDestination = $state(0);
   let showExitPopup = $state(false);
+  let chapelCoords = [120.9765, 14.47279];
   
   let matchProperty = $derived(() => 
     matchName ? propertyFeatures.find((p) => p.name === matchName) : null
@@ -61,24 +62,22 @@
     { value: 'osm', label: 'OpenStreetMap' }
   ];
 
-  onMount(async () => {
-    const pathSegments = window.location.pathname.split('/');
-    if (pathSegments[1] === 'graves' && pathSegments[2]) {
-      selectedBlock = decodeURIComponent(pathSegments[2]);
-      matchName = selectedBlock;
-      console.log('URL-based block selection:', selectedBlock);
-    }
-    
-    // Initialize map first
-    const initTimeout = setTimeout(() => {
-      initializeMap();
-    }, 100);
+onMount(async () => {
+  const pathSegments = window.location.pathname.split('/');
+  if (pathSegments[1] === 'graves' && pathSegments[2]) {
+    selectedBlock = decodeURIComponent(pathSegments[2]);
+    matchName = selectedBlock;
+    console.log('URL-based block selection:', selectedBlock);
+  }
 
-    // Auto-start tracking
-    startTracking();
-  });
+  const initTimeout = setTimeout(() => {
+    initializeMap();
+  }, 100);
 
-  function extractLngLatFromGeometry(geometry) {
+  startTracking();
+});
+
+function extractLngLatFromGeometry(geometry) {
     try {
       // Handle different geometry types
       if (geometry.type === 'Point') {
@@ -433,6 +432,22 @@ async function loadLineStringFeatures() {
 
   let destinationMarker = null;
 
+function forceRouteThroughGate(routeCoordinates, mainGateCoord) {
+  const startCoord = routeCoordinates[0];
+  const endCoord = routeCoordinates[routeCoordinates.length - 1];
+
+  const distanceToGateFromStart = calculateDistance(startCoord, mainGateCoord);
+  const distanceToGateFromEnd = calculateDistance(endCoord, mainGateCoord);
+
+  // If route doesn't already start at the gate and gate is closer to start, prepend it
+  if (distanceToGateFromStart > 10 && distanceToGateFromStart < distanceToGateFromEnd) {
+    return [mainGateCoord, ...routeCoordinates];
+  }
+
+  // If route ends at the gate (which may be the case), no need to add again
+  return routeCoordinates;
+}
+
 
 function findNearestPointOnLine(targetPoint, lineCoordinates) {
   let nearestPoint = null;
@@ -733,49 +748,115 @@ function isPointInCemetery(coordinates) {
     map.fitBounds(bounds, { padding: 100 });
   }
 
-  function startNavigationUpdates() {
-    if (directionUpdateInterval) {
-      clearInterval(directionUpdateInterval);
-    }
-
-    directionUpdateInterval = setInterval(() => {
-      if (!isTracking || !userLocation || !currentRoute) return;
-
-      const { closestIndex, distance } = findClosestPointOnRoute(
-        [userLocation.lng, userLocation.lat],
-        currentRoute.coordinates
-      );
-
-      const destination = currentRoute.coordinates[currentRoute.coordinates.length - 1];
-      directDistanceToDestination = calculateDistance([userLocation.lng, userLocation.lat], destination);
-
-      const totalDistance = currentRoute.distance;
-      const traveledDistance = calculatePathDistance(currentRoute.coordinates.slice(0, closestIndex + 1));
-      progressPercentage = Math.min(100, Math.max(0, (traveledDistance / totalDistance) * 100));
-
-      if (!isInsideCemetery) {
-        const cemeteryBoundary = getCemeteryBoundary();
-        isInsideCemetery = pointInPolygon(
-          [userLocation.lng, userLocation.lat],
-          cemeteryBoundary
-        );
-
-        if (isInsideCemetery) {
-          showSuccess("Entered cemetery grounds - switching to internal navigation");
-        }
-      }
-
-      distanceToDestination = calculateRemainingDistance(closestIndex);
-      currentStep = getCurrentStep(closestIndex);
-
-      // Check if arrived at destination (within 10 meters)
-      if (directDistanceToDestination < 10) {
-        completeNavigation();
-      }
-    }, 1000);
+  class ChapelRouteNavigator {
+  constructor({ userLocation, routeCoords, routeSteps, chapelArrived, error, isRouting }) {
+    this.userLocation = userLocation;
+    this.routeCoords = routeCoords;
+    this.routeSteps = routeSteps;
+    this.chapelArrived = chapelArrived;
+    this.error = error;
+    this.isRouting = isRouting;
+    this.isRouting.set(false);
   }
 
-  function calculateRemainingDistance(closestIndex) {
+  async startChapelNavigation(destination, chapel) {
+    this.isRouting.set(true);
+    try {
+      const userCoords = get(this.userLocation);
+      const toChapel = await getRouteBetween(userCoords, chapel);
+      const fromChapel = await getRouteBetween(chapel, destination);
+
+      const mergedCoords = [...toChapel.coordinates, ...fromChapel.coordinates];
+      const mergedSteps = [...toChapel.steps || [], ...fromChapel.steps || []];
+
+      this.routeCoords.set(mergedCoords);
+      this.routeSteps.set(mergedSteps);
+      this.isRouting.set(false);
+    } catch (err) {
+      this.error.set(err.message);
+      this.isRouting.set(false);
+    }
+  }
+
+  startNavigationUpdates(destination, chapel) {
+    setInterval(() => {
+      const coords = get(this.userLocation);
+      if (!coords) return;
+
+      const atChapel = this.isNear(coords, chapel);
+      if (atChapel) this.chapelArrived.set(true);
+    }, 5000);
+  }
+
+  isNear(coordA, coordB) {
+    const dx = coordA.lng - coordB.lng;
+    const dy = coordA.lat - coordB.lat;
+    return Math.sqrt(dx * dx + dy * dy) < 0.0002;
+  }
+}
+
+function enforceRouteFromGate(userPoint, routeCoordinates, gateCoordinate) {
+  // If user is near the gate, start the route from there
+  const gateDistance = calculateDistance(userPoint, gateCoordinate);
+
+  // If gate is not part of the current route yet, force route to start from there
+  const gateIndexInRoute = routeCoordinates.findIndex(coord =>
+    coord[0] === gateCoordinate[0] && coord[1] === gateCoordinate[1]
+  );
+
+  if (gateDistance < 50 && gateIndexInRoute !== 0) {
+    // Forcefully insert gateCoordinate at the beginning
+    const slicedRoute = routeCoordinates.slice(gateIndexInRoute);
+    return [gateCoordinate, ...slicedRoute];
+  }
+
+  // Otherwise find closest point and continue from there
+  const { closestIndex } = findClosestPointOnRoute(userPoint, routeCoordinates);
+  return routeCoordinates.slice(closestIndex);
+}
+
+
+
+function startNavigationUpdates() {
+  if (directionUpdateInterval) clearInterval(directionUpdateInterval);
+
+  directionUpdateInterval = setInterval(async () => {
+    if (!isTracking || !userLocation || !currentRoute) return;
+
+    const chapelCoords = [121.0441, 14.643];
+    const userCoords = [userLocation.lng, userLocation.lat];
+    const destination = currentRoute.coordinates[currentRoute.coordinates.length - 1];
+
+    if (!hasReroutedToChapel) {
+      console.log("⏳ Attempting to reroute via chapel...");
+      
+      const newCoords = await modifyRouteToPassThroughChapel(
+        userCoords,
+        chapelCoords,
+        destination
+      );
+
+      if (newCoords && newCoords.length > 1) {
+        currentRoute.coordinates = newCoords;
+        hasReroutedToChapel = true;
+        console.log("✅ Route now includes chapel");
+        displayRoute(); // <-- VERY IMPORTANT
+      } else {
+        console.warn("⚠️ Failed to reroute via chapel");
+      }
+    }
+
+    // Navigation tracking logic...
+    const { closestIndex } = findClosestPointOnRoute(userCoords, currentRoute.coordinates);
+    const remainingDistance = calculateRemainingDistance(closestIndex);
+    console.log("Remaining Distance:", remainingDistance.toFixed(2), "meters");
+
+    // Possibly update marker, directions, etc.
+  }, 1000);
+}
+
+
+function calculateRemainingDistance(closestIndex) {
     let distance = 0;
     const coords = currentRoute.coordinates;
     for (let i = closestIndex; i < coords.length - 1; i++) {
@@ -828,20 +909,91 @@ function isPointInCemetery(coordinates) {
     throw new Error('No route found');
   }
 
-  function findClosestPointOnRoute(userPoint, routeCoordinates) {
-    let closestIndex = 0;
-    let minDistance = Infinity;
-    
-    routeCoordinates.forEach((coord, index) => {
-      const distance = calculateDistance(userPoint, coord);
-      if (distance < minDistance) {
-        minDistance = distance;
-        closestIndex = index;
-      }
-    });
-    
-    return { closestIndex, distance: minDistance };
+  function isHeadingEast(route) {
+  const coords = route.geometry.coordinates;
+  const [startLng] = coords[0];
+  const [endLng] = coords[coords.length - 1];
+
+  // If the longitude is increasing significantly, assume it's eastward
+  return (endLng - startLng) > 0.001;
+}
+
+function insertChapelAlways(route, chapelCoords) {
+  const coords = route.geometry.coordinates;
+
+  const newCoords = [
+    ...coords.slice(0, Math.floor(coords.length / 2)),
+    chapelCoords,
+    ...coords.slice(Math.floor(coords.length / 2))
+  ];
+
+  route.geometry.coordinates = newCoords;
+
+  return route;
+}
+
+function findClosestPointOnRoute(userPoint, routeCoordinates) {
+  let closestIndex = 0;
+  let minDistance = Infinity;
+
+  routeCoordinates.forEach((coord, index) => {
+    const distance = calculateDistance(userPoint, coord);
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = index;
+    }
+  });
+
+  return { closestIndex, distance: minDistance };
+}
+
+async function getRouteBetween(start, end) {
+  const response = await fetch(`https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`);
+  const data = await response.json();
+
+  if (!data.routes || data.routes.length === 0) {
+    console.error("No routes found between", start, "and", end);
+    return null;
   }
+
+  return data.routes[0].geometry.coordinates;
+}
+
+
+async function modifyRouteToPassThroughChapel(userCoords, chapelCoords, destinationCoords) {
+  console.log("Getting path to chapel from:", userCoords);
+  const pathToChapel = await getRouteBetween(userCoords, chapelCoords);
+  console.log("Path to chapel:", pathToChapel);
+
+  console.log("Getting path to destination from chapel:", chapelCoords);
+  const pathToDestination = await getRouteBetween(chapelCoords, destinationCoords);
+  console.log("Path to destination:", pathToDestination);
+
+  if (!pathToChapel || !pathToDestination) {
+    console.error("One or both paths are invalid");
+    return null;
+  }
+
+  return [...pathToChapel, ...pathToDestination];
+}
+
+function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
+  let closestIndex = minIndex;
+  let minDistance = Infinity;
+
+  for (let i = minIndex; i < routeCoordinates.length; i++) {
+    const coord = routeCoordinates[i];
+    const distance = calculateDistance(userPoint, coord);
+
+    if (distance < minDistance) {
+      minDistance = distance;
+      closestIndex = i;
+    }
+  }
+
+  return { closestIndex, distance: minDistance };
+}
+
 
   function calculateDistance(point1, point2) {
     const R = 6371e3; // Earth's radius in meters

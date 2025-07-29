@@ -31,6 +31,7 @@
 		"vite": "^6.2.6"
 	},
 	"dependencies": {
+		"@turf/turf": "^7.2.0",
 		"interactjs": "^1.10.27",
 		"mapbox-gl": "^3.13.0"
 	}
