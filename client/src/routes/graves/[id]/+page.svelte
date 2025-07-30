@@ -1531,12 +1531,12 @@ $effect(() => {
           <span class="ml-1 font-normal text-gray-600">
             {matchName || selectedProperty?.name || 'No block selected'}
           </span>
-          <button 
+          <!--
+<button 
   onclick={toggleSearchDropdown}
   class="w-full flex items-center justify-between px-3 py-2 bg-transparent border border-transparent rounded-md hover:bg-gray-100 focus:ring-0 focus:outline-none text-sm"
 >
   <div class="flex items-center space-x-2 text-gray-500">
-
   </div>
   <svg 
     class="w-4 h-4 text-gray-400 transform transition-transform duration-200 {showSearchDropdown ? 'rotate-180' : ''}" 
@@ -1547,6 +1547,8 @@ $effect(() => {
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
   </svg>
 </button>
+-->
+
         </label>
 
 
