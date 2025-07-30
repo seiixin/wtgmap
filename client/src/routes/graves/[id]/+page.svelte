@@ -2,8 +2,10 @@
   import { onMount } from 'svelte';
   import mapboxgl from 'mapbox-gl';
   import { tick } from 'svelte';
+  import { goto } from '$app/navigation';
 
   // Svelte 5 runes
+  let showSearchDropdown = $state(false);
   let matchName = $state('');
   let grave;
   let mapContainer = $state();
@@ -45,6 +47,7 @@
   let directDistanceToDestination = $state(0);
   let showExitPopup = $state(false);
   let chapelCoords = [120.9765, 14.47279];
+  import { routeCoords, routeSteps, chapelArrived, error, isRouting } from '$lib/stores';
   
   let matchProperty = $derived(() => 
     matchName ? propertyFeatures.find((p) => p.name === matchName) : null
@@ -70,13 +73,113 @@ onMount(async () => {
     console.log('URL-based block selection:', selectedBlock);
   }
 
-  const initTimeout = setTimeout(() => {
-    initializeMap();
-  }, 100);
 
-  startTracking();
+  // ✅ Wait for map to be fully initialized
+  await new Promise(resolve => setTimeout(resolve, 100));
+  initializeMap();
+
+  // ✅ Auto erase and putback function when map loads
+  if (selectedBlock) {
+    await autoEraseAndPutBack();
+  }
+
+  // ✅ Ensure you wait until routeCoords and destination are available
+  const waitForRoutingData = async () => {
+    while (!userLocation || !routeCoords?.length || !routeSteps?.length || !destination) {
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+
+    console.log('✅ Routing data ready. Starting navigation.');
+
+    navigator = new ChapelRouteNavigator({
+      userLocation,
+      routeCoords,
+      routeSteps,
+      chapelArrived,
+      error,
+      isRouting
+    });
+
+    navigator.startNavigationUpdates(destination, chapel);
+  };
+
+  waitForRoutingData();
 });
 
+// ✅ Enhanced auto erase and putback function
+async function autoEraseAndPutBack() {
+  const originalMatchName = matchName;
+  const originalSelectedProperty = selectedProperty;
+  
+  console.log('🔄 Auto erase and putback started for:', originalMatchName);
+  
+  // Step 1: Clear the values
+  matchName = '';
+  selectedProperty = null;
+  
+  // Step 2: Wait for map to fully load AND features to be loaded
+  const waitForMapAndFeatures = async () => {
+    let attempts = 0;
+    const maxAttempts = 100; // 20 seconds max wait
+    
+    while (attempts < maxAttempts) {
+      console.log(`⏳ Attempt ${attempts + 1}: isMapLoaded=${isMapLoaded}, properties.length=${properties.length}`);
+      
+      // Check if map is loaded and we have features from the map
+      if (isMapLoaded && properties.length > 0) {
+        console.log('✅ Map and properties are ready!');
+        return true;
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 200));
+      attempts++;
+    }
+    
+    console.error('❌ Timeout waiting for map and properties');
+    return false;
+  };
+  
+  const ready = await waitForMapAndFeatures();
+  
+  if (!ready) {
+    // Restore original values if failed
+    matchName = originalMatchName;
+    selectedProperty = originalSelectedProperty;
+    console.error('❌ Failed to load, restoring original values');
+    return;
+  }
+  
+  // Step 3: Wait a bit more then restore
+  await new Promise(resolve => setTimeout(resolve, 500));
+  
+  console.log('🔍 Searching for property:', originalMatchName);
+  console.log('📋 Available properties:', properties.map(p => p.name));
+  
+  // Find the property and restore
+  const foundProperty = properties.find(p => 
+    p.name.toLowerCase() === originalMatchName.toLowerCase()
+  );
+  
+  if (foundProperty) {
+    selectedProperty = foundProperty;
+    matchName = originalMatchName;
+    console.log('✅ Successfully restored property:', foundProperty);
+  } else {
+    // Try exact match without case sensitivity
+    const exactMatch = properties.find(p => p.name === originalMatchName);
+    
+    if (exactMatch) {
+      selectedProperty = exactMatch;
+      matchName = originalMatchName;
+      console.log('✅ Found exact match:', exactMatch);
+    } else {
+      // Just restore the matchName
+      matchName = originalMatchName;
+      console.log('⚠️ Property not found in array, restored matchName only');
+      console.log('Available properties:', properties.map(p => `"${p.name}"`));
+    }
+  }
+}
 function extractLngLatFromGeometry(geometry) {
     try {
       // Handle different geometry types
@@ -98,6 +201,40 @@ function extractLngLatFromGeometry(geometry) {
     return { lng: null, lat: null };
   }
 
+function tryPreselectBlock() {
+  if (!selectedBlock || !map?.getSource('locator-source')) return false;
+
+  const source = map.getSource('locator-source');
+
+  // Make sure it's a GeoJSON source
+  if (source && source._data?.features) {
+    const features = source._data.features;
+
+    // Try to match block name (case insensitive)
+    const matched = features.find((f) =>
+      f.properties?.name?.toLowerCase() === selectedBlock.toLowerCase()
+    );
+
+    if (matched) {
+      const [lng, lat] = matched.geometry.coordinates;
+
+      const property = {
+        id: matched.id,
+        name: matched.properties.name,
+        lng,
+        lat,
+        feature: matched
+      };
+
+      selectedProperty = property;
+      matchName = selectedBlock;
+
+      return true;
+    }
+  }
+
+  return false;
+}
 
   function initializeMap() {
     if (!mapContainer) return;
@@ -154,232 +291,222 @@ function extractLngLatFromGeometry(geometry) {
       .setLngLat([120.9763, 14.4725])
       .addTo(map);
 
-    // All layers must be added only after the map loads
-    map.on('load', async () => {
-      isMapLoaded = true;
-      map.resize();
-      
-      // Add BOTH subdivision and locator block sources
-      map.addSource('subdivision-blocks-source', {
-        type: 'vector',
-        url: 'mapbox://intellitech.cmdmlm8n90bju1onvjg1lijbp-54whw'
-      });
+  // All layers must be added only after the map loads
+map.once('idle', async () => {
+  isMapLoaded = true;
+  map.resize();
 
-      map.addSource('locator-blocks-source', {
-        type: 'vector', 
-        url: 'mapbox://intellitech.cmdngha7ab8101mpcv9pk5vt2-831gg'
-      });
-      
-      // Add subdivision blocks layer (polygons) - LOWER opacity
-// Replace the cemetery-paths layer (around line 210) with:
-map.addLayer({
-  id: 'cemetery-paths',
-  type: 'line',
-  source: 'subdivision-blocks-source',
-  'source-layer': 'subdivision-blocks',
-  paint: {
-    'line-color': '#10b981', // Green for internal paths
-    'line-width': 3,
-    'line-opacity': 0
-  },
-  filter: ['==', '$type', 'LineString']
-});
+  // 🔹 Add vector sources
+  map.addSource('subdivision-blocks-source', {
+    type: 'vector',
+    url: 'mapbox://intellitech.cmdmlm8n90bju1onvjg1lijbp-54whw'
+  });
 
-      // Add subdivision blocks outline
-      map.addLayer({
-        id: 'subdivision-blocks-outline',
-        type: 'line',
-        source: 'subdivision-blocks-source',
-        'source-layer': 'subdivision-blocks',
-        paint: {
-          'line-color': '#1d4ed8',
-          'line-width': 1,
-          'line-opacity': 0.5
-        },
-        filter: ['==', '$type', 'Polygon']
-      });
+  map.addSource('locator-blocks-source', {
+    type: 'vector',
+    url: 'mapbox://intellitech.cmdngha7ab8101mpcv9pk5vt2-831gg'
+  });
 
-      // Add locator blocks layer (points) - INVISIBLE but used for navigation
-      map.addLayer({
-        id: 'locator-blocks',
-        type: 'circle',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks', 
-        paint: {
-          'circle-radius': [
-            'interpolate',
-            ['linear'],
-            ['zoom'],
-            15, 6,
-            20, 10,
-            22, 14
-          ],
-          'circle-color': '#ef4444',
-          'circle-stroke-width': 3,
-          'circle-stroke-color': 'transparent',
-          'circle-opacity': 0.0  // INVISIBLE - used only for navigation logic
-        }
-      });
+  // 🔹 Add subdivision block layers
+  map.addLayer({
+    id: 'cemetery-paths',
+    type: 'line',
+    source: 'subdivision-blocks-source',
+    'source-layer': 'subdivision-blocks',
+    paint: {
+      'line-color': '#ffffff',
+      'line-width': 3,
+      'line-opacity': 1
+    },
+    filter: ['==', '$type', 'LineString']
+  });
 
-      // Add locator blocks labels - INVISIBLE
-      map.addLayer({
-        id: 'locator-blocks-labels',
-        type: 'symbol',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        layout: {
-          'text-field': ['get', 'name'],
-          'text-size': 12,
-          'text-offset': [0, 2],
-          'text-anchor': 'top'
-        },
-        paint: {
-          'text-color': '#ef4444',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 2,
-          'text-opacity': 0.0  // INVISIBLE - used only for navigation logic
-        }
-      });
+  map.addLayer({
+    id: 'subdivision-blocks-outline',
+    type: 'line',
+    source: 'subdivision-blocks-source',
+    'source-layer': 'subdivision-blocks',
+    paint: {
+      'line-color': '#1d4ed8',
+      'line-width': 1,
+      'line-opacity': 0.5
+    },
+    filter: ['==', '$type', 'Polygon']
+  });
 
-      // Add tiny solid circles like Google Maps
-      map.addLayer({
-        id: 'block-markers',
-        type: 'circle',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        paint: {
-          'circle-radius': 4, // Tiny solid circle
-          'circle-color': '#008000',
-          'circle-stroke-width': 0,
-          'circle-stroke-color': '#ffffff',
-          'circle-opacity': 0.5
-        }
-      });
+  // 🔹 Add locator block layers (used for navigation)
+  map.addLayer({
+    id: 'locator-blocks',
+    type: 'circle',
+    source: 'locator-blocks-source',
+    'source-layer': 'locator-blocks',
+    paint: {
+      'circle-radius': [
+        'interpolate', ['linear'], ['zoom'],
+        15, 6, 20, 10, 22, 14
+      ],
+      'circle-color': '#ef4444',
+      'circle-stroke-width': 3,
+      'circle-stroke-color': 'transparent',
+      'circle-opacity': 0.0
+    }
+  });
 
-      // Add this after loading other features (around line 280)
-await loadLineStringFeatures();
+  map.addLayer({
+    id: 'locator-blocks-labels',
+    type: 'symbol',
+    source: 'locator-blocks-source',
+    'source-layer': 'locator-blocks',
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-size': 12,
+      'text-offset': [0, 2],
+      'text-anchor': 'top'
+    },
+    paint: {
+      'text-color': '#ef4444',
+      'text-halo-color': '#ffffff',
+      'text-halo-width': 2,
+      'text-opacity': 0.0
+    }
+  });
 
-async function loadLineStringFeatures() {
-  try {
-    const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
-    lineStringFeatures = features.filter(f => f.geometry.type === 'LineString').map(feature => ({
-      id: feature.id,
-      coordinates: feature.geometry.coordinates,
-      properties: feature.properties,
-      geometry: feature.geometry
-    }));
-    console.log('Loaded LineString features:', lineStringFeatures.length);
-  } catch (error) {
-    console.error('Error loading LineString features:', error);
+  map.addLayer({
+    id: 'block-markers',
+    type: 'circle',
+    source: 'locator-blocks-source',
+    'source-layer': 'locator-blocks',
+    paint: {
+      'circle-radius': 4,
+      'circle-color': '#008000',
+      'circle-opacity': 0.5
+    }
+  });
+
+  map.addLayer({
+    id: 'block-labels',
+    type: 'symbol',
+    source: 'locator-blocks-source',
+    'source-layer': 'locator-blocks',
+    layout: {
+      'text-field': ['get', 'name'],
+      'text-size': 11,
+      'text-offset': [0, 1.5],
+      'text-anchor': 'top',
+      'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold']
+    },
+    paint: {
+      'text-color': '#374151',
+      'text-halo-color': '#ffffff',
+      'text-halo-width': 1
+    }
+  });
+
+  // 🔹 Load cemetery paths for route logic
+  await loadLineStringFeatures();
+
+  async function loadLineStringFeatures() {
+    try {
+      const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
+      lineStringFeatures = features
+        .filter(f => f.geometry.type === 'LineString')
+        .map(f => ({
+          id: f.id,
+          coordinates: f.geometry.coordinates,
+          properties: f.properties,
+          geometry: f.geometry
+        }));
+      console.log('Loaded LineString features:', lineStringFeatures.length);
+    } catch (error) {
+      console.error('Error loading LineString features:', error);
+    }
   }
-}
 
-      // Add simple block labels (no child/adult/bone info)
-      map.addLayer({
-        id: 'block-labels',
-        type: 'symbol',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        layout: {
-          'text-field': ['get', 'name'],
-          'text-size': 11,
-          'text-offset': [0, 1.5],
-          'text-anchor': 'top',
-          'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold']
-        },
-        paint: {
-          'text-color': '#374151',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 1
-        }
-      });
+  // 🔹 Handle map click on locator block
+  map.on('click', 'locator-blocks', (e) => {
+    const feature = e.features?.[0];
+    const name = feature?.properties?.name;
+    if (!name) return;
 
-      // Add cemetery paths
-      map.addLayer({
-        id: 'cemetery-paths',
-        type: 'line',
-        source: 'subdivision-blocks-source',
-        'source-layer': 'subdivision-blocks',
-        paint: {
-          'line-color': '#ef4444',
-          'line-width': 2,
-          'line-opacity': 0
-        },
-        filter: ['==', '$type', 'LineString']
-      });
-      
-      // Handle clicking on LOCATOR blocks (for navigation)
-      map.on('click', 'locator-blocks', (e) => {
-        const feature = e.features?.[0];
-        const name = feature?.properties?.name;
-        if (!name) return;
-        
-        const property = {
-          id: feature.id,
-          name,
-          lng: e.lngLat.lng,
-          lat: e.lngLat.lat,
-          feature
+    const property = {
+      id: feature.id,
+      name,
+      lng: e.lngLat.lng,
+      lat: e.lngLat.lat,
+      feature
+    };
+
+    selectedProperty = property;
+    matchName = name;
+
+    startNavigationToProperty(property);
+    showSuccess(`Selected locator: ${name}`);
+
+      // 🔥 Navigate to /graves/{block} in the URL
+      goto(`/graves/${name}`);
+  });
+
+  // 🔹 Cursor styles for locator blocks
+  map.on('mouseenter', 'locator-blocks', () => {
+    map.getCanvas().style.cursor = 'pointer';
+  });
+
+  map.on('mouseleave', 'locator-blocks', () => {
+    map.getCanvas().style.cursor = '';
+  });
+// Count locator blocks once map is idle
+    map.once('idle', () => {
+      try {
+        const features = map.querySourceFeatures('locator-blocks-source', {
+          sourceLayer: 'locator-blocks',
+        });
+        const count = features.length;
+        showSuccess(`Loaded ${count} locator blocks`);
+        console.log(`Loaded ${count} locator blocks`);
+      } catch (error) {
+        console.error('Error loading locator blocks:', error);
+        showError('Failed to count locator blocks.');
+      }
+    });
+
+  // 🔹 After all layers are ready, try auto-navigation from URL
+  map.once('idle', () => {
+    setTimeout(async () => {
+      await loadFeaturesFromMap();
+
+      if (selectedBlock && properties.length > 0) {
+        const success = tryPreselectBlock();
+
+        if (success && selectedProperty && userLocation) {
+          console.log('Auto-navigating to:', selectedProperty.name);
+          await startNavigationToProperty(selectedProperty);
+          showSuccess(`Auto-navigating to ${selectedProperty.name}`);
+        } else if (success && selectedProperty && !userLocation) {
+          showSuccess(`Block ${selectedProperty.name} selected. Starting location tracking...`);
+          setTimeout(async () => {
+            await startTracking();
+            setTimeout(async () => {
+              if (userLocation && selectedProperty) {
+                console.log('Location acquired, auto-navigating to:', selectedProperty.name);
+                await startNavigationToProperty(selectedProperty);
+                showSuccess(`Auto-navigating to ${selectedProperty.name}`);
+              }
+            }, 3000);
+          }, 500);
         };
         
-        selectedProperty = property;
-        matchName = name;
-        
-        startNavigationToProperty(property);
-        showSuccess(`Selected locator: ${name}`);
-      });
-
-      // Change cursor on hover for locator blocks
-      map.on('mouseenter', 'locator-blocks', () => {
-        map.getCanvas().style.cursor = 'pointer';
-      });
-
-      map.on('mouseleave', 'locator-blocks', () => {
-        map.getCanvas().style.cursor = '';
-      });
-      
-      // Wait for tiles to load then try auto-navigation
-      map.once('idle', () => {
-        setTimeout(async () => {
-          await loadFeaturesFromMap();
-          
-          // AUTO-NAVIGATION: Try to find and navigate to the block from URL
-          if (selectedBlock && properties.length > 0) {
-            const success = tryPreselectBlock();
-            if (success && selectedProperty && userLocation) {
-              console.log('Auto-navigating to:', selectedProperty.name);
-              await startNavigationToProperty(selectedProperty);
-              showSuccess(`Auto-navigating to ${selectedProperty.name}`);
-            } else if (success && selectedProperty && !userLocation) {
-              showSuccess(`Block ${selectedProperty.name} selected. Starting location tracking...`);
-              // Auto-start location tracking and retry navigation
-              setTimeout(async () => {
-                await startTracking();
-                // Wait a bit for location to be acquired, then auto-navigate
-                setTimeout(async () => {
-                  if (userLocation && selectedProperty) {
-                    console.log('Location acquired, auto-navigating to:', selectedProperty.name);
-                    await startNavigationToProperty(selectedProperty);
-                    showSuccess(`Auto-navigating to ${selectedProperty.name}`);
-                  }
-                }, 3000);
-              }, 500);
-            } else {
-              showError(`Block "${selectedBlock}" not found. Please check the block name.`);
-            }
-          }
-        }, 2000);
-      });
-
-      // Auto-start location tracking if URL has block parameter
-      if (selectedBlock) {
-        setTimeout(() => {
-          startTracking();
-        }, 1000);
       }
-      
-    });
-    
+    }, 2000);
+  });
+
+  // 🔹 Auto-start tracking if block is present in URL
+  if (selectedBlock) {
+    setTimeout(() => {
+      startTracking();
+    }, 1000);
+  }
+});
+
 
     // Mouse move handler
     map.on('mousemove', (e) => {
@@ -429,8 +556,40 @@ async function loadLineStringFeatures() {
     propertyFeatures = processedProperties;
     console.log(`Loaded ${properties.length} locator blocks`);
   }
+async function selectBlockByName(blockName) {
+  if (!map || !blockName) return false;
 
-  let destinationMarker = null;
+  const features = map.querySourceFeatures('locator-blocks-source', {
+    sourceLayer: 'locator-blocks',
+    filter: ['==', ['get', 'name'], blockName]
+  });
+
+  if (features.length === 0) return false;
+
+  const feature = features[0];
+  const coordinates = feature.geometry.coordinates;
+
+  selectedProperty.set({
+    id: feature.id || feature.properties.id || blockName,
+    name: feature.properties.name,
+    lng: coordinates[0],
+    lat: coordinates[1],
+    feature
+  });
+
+  matchName = feature.properties.name;
+
+  map.flyTo({
+    center: coordinates,
+    zoom: 20,
+    essential: true
+  });
+
+  showSuccess(`Selected locator: ${feature.properties.name}`);
+  return true;
+}
+
+let destinationMarker = null;
 
 function forceRouteThroughGate(routeCoordinates, mainGateCoord) {
   const startCoord = routeCoordinates[0];
@@ -485,84 +644,148 @@ function findNearestPointOnLine(targetPoint, lineCoordinates) {
   };
 }
 
-  function handleSearchInput(e) {
-    const val = e.target.value.trim();
-    matchName = val;
-    
-    // Auto-select if exact match found in locator-blocks
-    const exactMatch = properties.find(p => 
-      p.name.toLowerCase() === val.toLowerCase()
-    );
-    
-    if (exactMatch) {
-      selectedProperty = exactMatch;
-      // Update URL when exact match found
-      const path = `/graves/${encodeURIComponent(exactMatch.name)}`;
-      history.pushState(null, '', path);
-    }
+function navigateToProperty(property) {
+  if (!property || !property.name) {
+    showError("Invalid property selected.");
+    return;
   }
 
+  selectedProperty = property;
+  matchName = property.name;
 
+  selectBlockByName(property.name)
+    .then(success => {
+      if (success) {
+        showOnlySelectedPath({ id: property.id || property.feature?.properties?.id });
+        startNavigationToProperty(property);
+        showSuccess(`Selected locator: ${property.name}`);
+      } else {
+        showError(`Block not found: ${property.name}`);
+      }
+    });
+}
+function handleSearchButtonClick(name) {
+  if (!name) {
+    showError("Please enter a block name.");
+    return;
+  }
+
+  // You might already have feature data from somewhere else
+  const feature = getFeatureByName(name); // <- implement this to match your app
+  if (!feature) {
+    showError(`Block "${name}" not found.`);
+    return;
+  }
+
+  const property = {
+    id: feature.id,
+    name: feature.properties.name,
+    lng: feature.geometry.coordinates[0],
+    lat: feature.geometry.coordinates[1],
+    feature
+  };
+
+  navigateToProperty(property);
+}
 async function startNavigationToProperty(property) {
-  if (!property || !userLocation) {
+  // ✅ Enhanced: Accept either selectedProperty or search by matchName
+  let targetProperty = property;
+  
+  // If no property passed but may matchName, search for it
+  if (!targetProperty && matchName && matchName.trim()) {
+    targetProperty = properties.find(
+      (p) => p.name.toLowerCase() === matchName.toLowerCase()
+    );
+    
+    if (!targetProperty) {
+      showError(`Block "${matchName}" not found. Please check the name or select from dropdown.`);
+      return;
+    }
+  }
+  
+  // Original validation
+  if (!targetProperty || !userLocation) {
     showError('Please enable location tracking and select a property');
     return;
   }
 
-  // Stop any existing navigation first
   stopNavigation();
 
   isLoading = true;
   isNavigating = true;
-  
+
   try {
-    // First check if we're already inside the cemetery
     const cemeteryBoundary = getCemeteryBoundary();
-    isInsideCemetery = pointInPolygon(
-      [userLocation.lng, userLocation.lat],
-      cemeteryBoundary
-    );
+    const userPoint = [userLocation.lng, userLocation.lat];
+    const isInsideCemetery = pointInPolygon(userPoint, cemeteryBoundary);
+
+    const destination = {
+      lng: targetProperty.longitude,  // ✅ Use targetProperty instead of property
+      lat: targetProperty.latitude
+    };
+
+    const navigator = new ChapelRouteNavigator({
+      userLocation,
+      routeCoords,
+      routeSteps,
+      chapelArrived,
+      error,
+      isRouting
+    });
 
     if (isInsideCemetery) {
-      // Use internal paths for navigation
-      await navigateUsingInternalPaths(property);
+      // ✅ Route directly inside cemetery
+      await navigateUsingInternalPaths(targetProperty);  // ✅ Use targetProperty
+
       currentRoute = {
         coordinates: selectedLineString.coordinates,
         distance: calculatePathDistance(selectedLineString.coordinates),
         steps: createInternalSteps(selectedLineString.coordinates)
       };
+
+      navigator.startNavigationUpdates(destination, null);
     } else {
-      // Get external route to cemetery entrance
-      const nearestEntrance = findNearestEntrance();
-      externalRoute = await getMapboxDirections(
-        [userLocation.lng, userLocation.lat],
-        [nearestEntrance.lng, nearestEntrance.lat]
-      );
-      
-      await navigateUsingInternalPaths(property);
-      
+      // ✅ Route: user → chapel → property
+      const chapel = {
+        lng: 120.9766,
+        lat: 14.4727,
+        name: "Chapel"
+      };
+
+      // Step 1: Route to chapel (outside)
+      const toChapelRoute = await getMapboxDirections(userPoint, [chapel.lng, chapel.lat]);
+
+      // Step 2: Internal path from chapel to property
+      await navigateUsingInternalPaths(targetProperty);  // ✅ Use targetProperty
+
       currentRoute = {
-        coordinates: [...externalRoute.coordinates, ...selectedLineString.coordinates],
-        distance: externalRoute.distance + calculatePathDistance(selectedLineString.coordinates),
+        coordinates: [
+          ...toChapelRoute.coordinates,
+          ...selectedLineString.coordinates
+        ],
+        distance: toChapelRoute.distance + calculatePathDistance(selectedLineString.coordinates),
         steps: [
-          ...externalRoute.steps,
+          ...toChapelRoute.steps,
           { instruction: "Enter cemetery grounds", distance: 0 },
           ...createInternalSteps(selectedLineString.coordinates)
         ]
       };
+
+      navigator.startNavigationUpdates(destination, chapel);
     }
-    
+
     displayRoute();
-    startNavigationUpdates();
-    
-  } catch (error) {
-    console.error('Navigation error:', error);
-    showError('Failed to create route: ' + error.message);
+
+  } catch (err) {
+    console.error('Navigation error:', err);
+    showError('Failed to create route: ' + err.message);
     stopNavigation();
   } finally {
     isLoading = false;
   }
 }
+
+
   // Route path directions functionality preserved from original
   function getCemeteryBoundary() {
     return [
@@ -816,45 +1039,44 @@ function enforceRouteFromGate(userPoint, routeCoordinates, gateCoordinate) {
 }
 
 
-
 function startNavigationUpdates() {
   if (directionUpdateInterval) clearInterval(directionUpdateInterval);
 
   directionUpdateInterval = setInterval(async () => {
     if (!isTracking || !userLocation || !currentRoute) return;
 
-    const chapelCoords = [121.0441, 14.643];
+    const chapelCoords = [120.9765, 14.47279]; // 🎯 Target
     const userCoords = [userLocation.lng, userLocation.lat];
-    const destination = currentRoute.coordinates[currentRoute.coordinates.length - 1];
+    const destination = currentRoute.coordinates.at(-1);
 
-    if (!hasReroutedToChapel) {
+    // ✅ Always use the most accurate closest point
+    const { closestIndex, closestPoint } = findClosestPointOnRoute(userCoords, currentRoute.coordinates);
+    const remainingCoords = currentRoute.coordinates.slice(closestIndex);
+
+    // 🔁 Check if chapel is still ahead in the route
+    const chapelStillAhead = remainingCoords.some(coord =>
+      calculateDistance(coord, chapelCoords) < 20
+    );
+
+    if (!hasReroutedToChapel && !chapelStillAhead) {
       console.log("⏳ Attempting to reroute via chapel...");
-      
-      const newCoords = await modifyRouteToPassThroughChapel(
-        userCoords,
-        chapelCoords,
-        destination
-      );
+
+      const newCoords = await modifyRouteToPassThroughChapel(userCoords, chapelCoords, destination);
 
       if (newCoords && newCoords.length > 1) {
         currentRoute.coordinates = newCoords;
         hasReroutedToChapel = true;
         console.log("✅ Route now includes chapel");
-        displayRoute(); // <-- VERY IMPORTANT
+        displayRoute();
       } else {
         console.warn("⚠️ Failed to reroute via chapel");
       }
     }
 
-    // Navigation tracking logic...
-    const { closestIndex } = findClosestPointOnRoute(userCoords, currentRoute.coordinates);
     const remainingDistance = calculateRemainingDistance(closestIndex);
-    console.log("Remaining Distance:", remainingDistance.toFixed(2), "meters");
-
-    // Possibly update marker, directions, etc.
+    console.log("📍 Remaining Distance:", remainingDistance.toFixed(2), "meters");
   }, 1000);
 }
-
 
 function calculateRemainingDistance(closestIndex) {
     let distance = 0;
@@ -933,19 +1155,25 @@ function insertChapelAlways(route, chapelCoords) {
 }
 
 function findClosestPointOnRoute(userPoint, routeCoordinates) {
-  let closestIndex = 0;
+  let closestPoint = null;
+  let closestIndex = -1;
   let minDistance = Infinity;
 
-  routeCoordinates.forEach((coord, index) => {
-    const distance = calculateDistance(userPoint, coord);
-    if (distance < minDistance) {
-      minDistance = distance;
-      closestIndex = index;
-    }
-  });
+  for (let i = 0; i < routeCoordinates.length - 1; i++) {
+    const start = routeCoordinates[i];
+    const end = routeCoordinates[i + 1];
+    const result = nearestPointOnSegment(userPoint, start, end);
 
-  return { closestIndex, distance: minDistance };
+    if (result.distance < minDistance) {
+      minDistance = result.distance;
+      closestPoint = result.point;
+      closestIndex = i; // Closest segment start index
+    }
+  }
+
+  return { closestPoint, closestIndex, distance: minDistance };
 }
+
 
 async function getRouteBetween(start, end) {
   const response = await fetch(`https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?geometries=geojson&access_token=${mapboxgl.accessToken}`);
@@ -960,38 +1188,76 @@ async function getRouteBetween(start, end) {
 }
 
 
-async function modifyRouteToPassThroughChapel(userCoords, chapelCoords, destinationCoords) {
-  console.log("Getting path to chapel from:", userCoords);
-  const pathToChapel = await getRouteBetween(userCoords, chapelCoords);
-  console.log("Path to chapel:", pathToChapel);
+// Example pseudo-code
+async function modifyRouteToPassThroughChapel(start, chapel, end) {
+  const routeToChapel = await getRoute(start, chapel);
+  const routeToEnd = await getRoute(chapel, end);
 
-  console.log("Getting path to destination from chapel:", chapelCoords);
-  const pathToDestination = await getRouteBetween(chapelCoords, destinationCoords);
-  console.log("Path to destination:", pathToDestination);
+  if (!routeToChapel || !routeToEnd) return null;
 
-  if (!pathToChapel || !pathToDestination) {
-    console.error("One or both paths are invalid");
-    return null;
-  }
-
-  return [...pathToChapel, ...pathToDestination];
+  return [...routeToChapel.slice(0, -1), ...routeToEnd]; // merge routes cleanly
 }
 
+
+
 function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
+  let closestPoint = null;
   let closestIndex = minIndex;
-  let minDistance = Infinity;
+  let shortestDistance = Infinity;
 
-  for (let i = minIndex; i < routeCoordinates.length; i++) {
-    const coord = routeCoordinates[i];
-    const distance = calculateDistance(userPoint, coord);
+  for (let i = minIndex; i < routeCoordinates.length - 1; i++) {
+    const projectedPoint = nearestPointOnSegment(userPoint, routeCoordinates[i], routeCoordinates[i + 1]);
+    const distance = calculateDistance(userPoint, projectedPoint);
 
-    if (distance < minDistance) {
-      minDistance = distance;
+    if (distance < shortestDistance) {
+      shortestDistance = distance;
+      closestPoint = projectedPoint;
       closestIndex = i;
     }
   }
 
-  return { closestIndex, distance: minDistance };
+  return {
+    point: closestPoint,
+    index: closestIndex,
+    distance: shortestDistance
+  };
+}
+
+function getRouteToBlock(userPoint, gatePoint, routeCoordinates, blockPoint, threshold = 50) {
+  const { point: closestPoint, distance } = findClosestPointOnRoute(userPoint, routeCoordinates);
+
+  if (distance < threshold) {
+    // 🟢 Close: use gate -> closest point -> follow route to block
+    const startIndex = findNearestRouteIndex(closestPoint, routeCoordinates);
+    const endIndex = findNearestRouteIndex(blockPoint, routeCoordinates);
+
+    const routeSegment = routeCoordinates.slice(startIndex, endIndex + 1);
+
+    return [gatePoint, ...routeSegment, blockPoint];
+  } else {
+    // 🔵 Far: use gate -> closest point -> closest forward point -> follow route to block
+    const { point: forwardPoint, index: forwardIndex } = findClosestForwardPoint(userPoint, routeCoordinates);
+    const blockIndex = findNearestRouteIndex(blockPoint, routeCoordinates);
+
+    const routeSegment = routeCoordinates.slice(forwardIndex, blockIndex + 1);
+
+    return [gatePoint, forwardPoint, ...routeSegment, blockPoint];
+  }
+}
+
+function findNearestRouteIndex(targetPoint, routeCoordinates) {
+  let minDistance = Infinity;
+  let nearestIndex = 0;
+
+  routeCoordinates.forEach((coord, i) => {
+    const dist = calculateDistance(targetPoint, coord);
+    if (dist < minDistance) {
+      minDistance = dist;
+      nearestIndex = i;
+    }
+  });
+
+  return nearestIndex;
 }
 
 
@@ -1164,6 +1430,58 @@ function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
       }
     }, 5000);
   }
+
+  // ✅ Auto-populate search input kapag may selectedProperty from dropdown
+$effect(() => {
+  if (selectedProperty && selectedProperty.name !== matchName) {
+    matchName = selectedProperty.name;
+  }
+});
+// ✅ Enhanced search handler with debounce
+function handleSearchInput(event) {
+  const val = event.target.value.trim();
+  matchName = val;
+  
+  // Clear previous timeout
+  clearTimeout(searchTimeout);
+  
+  // Debounce search
+  searchTimeout = setTimeout(() => {
+    if (val) {
+      const foundProperty = properties.find(p => 
+        p.name.toLowerCase().includes(val.toLowerCase())
+      );
+      
+      // Only auto-select if exact match
+      if (foundProperty && foundProperty.name.toLowerCase() === val.toLowerCase()) {
+        selectedProperty = foundProperty;
+      }
+      // Don't clear selectedProperty for partial matches to avoid flickering
+    } else {
+      selectedProperty = null;
+    }
+  }, 300);
+}
+
+// ✅ Optional: Auto-populate on properties load
+$effect(() => {
+  if (properties.length > 0 && !selectedProperty && !matchName) {
+    // Auto-select first property if needed
+    // selectedProperty = properties[0];
+    // matchName = properties[0].name;
+  }
+});
+
+  // ✅ Toggle dropdown function
+  function toggleSearchDropdown() {
+    showSearchDropdown = !showSearchDropdown;
+  }
+  // ✅ Auto-sync between dropdown and search
+  $effect(() => {
+    if (selectedProperty?.name && selectedProperty.name !== matchName) {
+      matchName = selectedProperty.name;
+    }
+  });
 </script>
 
 <svelte:head>
@@ -1213,20 +1531,68 @@ function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
           <span class="ml-1 font-normal text-gray-600">
             {matchName || selectedProperty?.name || 'No block selected'}
           </span>
+          <button 
+  onclick={toggleSearchDropdown}
+  class="w-full flex items-center justify-between px-3 py-2 bg-transparent border border-transparent rounded-md hover:bg-gray-100 focus:ring-0 focus:outline-none text-sm"
+>
+  <div class="flex items-center space-x-2 text-gray-500">
+
+  </div>
+  <svg 
+    class="w-4 h-4 text-gray-400 transform transition-transform duration-200 {showSearchDropdown ? 'rotate-180' : ''}" 
+    fill="none" 
+    stroke="currentColor" 
+    viewBox="0 0 24 24"
+  >
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+  </svg>
+</button>
         </label>
 
-        <label for="search" class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
-          Search Grave Block
+
+<!-- Dropdown Content -->
+{#if showSearchDropdown}
+  <div class="mt-2 bg-white border border-gray-300 rounded-lg shadow-lg p-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
+    <!-- Grave Block Search -->
+    <div>
+      <label class="block text-sm font-semibold text-gray-700 mb-1">
+        🔍 Looking for:
+        <span class="ml-1 font-normal text-gray-600">
+          {matchName || selectedProperty?.name || 'No block selected'}
+        </span>
+      </label>
+
+      <label for="search" class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
+        Search Grave Block
+      </label>
+      <input
+        id="search"
+        type="text"
+        bind:value={matchName}
+        placeholder="{matchName || selectedProperty?.name || 'Enter block name'}"
+        class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+        oninput={handleSearchInput}
+      />
+
+      <!-- Block Selection -->
+      <div class="w-full">
+        <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
+          List of Grave Block
         </label>
-        <input
-          id="search"
-          type="text"
-          bind:value={matchName}
-          placeholder="Enter block name (e.g., Block-1-Private-14)"
+        <select
+          bind:value={selectedProperty}
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-          oninput={handleSearchInput}
-        />
-        <!-- Block Selection -->
+        >
+          <option value={null}>Select a block</option>
+          {#each properties as property (property.id)}
+            <option value={property}>{property.name}</option>
+          {/each}
+        </select>
+      </div>
+    </div>
+  </div>
+{/if}
+
       <!-- Navigation Controls -->
       <div class="col-span-1 lg:col-span-2 flex flex-col gap-2">
         <button
@@ -1337,6 +1703,7 @@ function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
   {/if}
 </main>
 
+
 <style>
   @import 'https://api.mapbox.com/mapbox-gl-js/v3.0.1/mapbox-gl.css';
 
@@ -1360,5 +1727,20 @@ function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
 
   :global(.mapboxgl-popup-tip) {
     border-top-color: white;
+  }
+
+   @keyframes slide-in-from-top {
+    from {
+      opacity: 0;
+      transform: translateY(-4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  
+  .animate-slide-in {
+    animation: slide-in-from-top 0.2s ease-out;
   }
 </style>
