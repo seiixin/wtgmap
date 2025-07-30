@@ -1525,13 +1525,12 @@ $effect(() => {
       </div>
 
       <!-- Grave Block Search -->
-      <div>
+<!--      <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1">
           🔍 Looking for:
           <span class="ml-1 font-normal text-gray-600">
             {matchName || selectedProperty?.name || 'No block selected'}
           </span>
-          <!--
 <button 
   onclick={toggleSearchDropdown}
   class="w-full flex items-center justify-between px-3 py-2 bg-transparent border border-transparent rounded-md hover:bg-gray-100 focus:ring-0 focus:outline-none text-sm"
@@ -1547,9 +1546,8 @@ $effect(() => {
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
   </svg>
 </button>
--->
 
-        </label>
+        </label>  -->
 
 
 <!-- Dropdown Content -->
