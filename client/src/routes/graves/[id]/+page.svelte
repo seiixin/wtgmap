@@ -4,6 +4,7 @@
   import { tick } from 'svelte';
   import { goto } from '$app/navigation';
 
+
   // Svelte 5 runes
   let showSearchDropdown = $state(false);
   let matchName = $state('');
@@ -36,6 +37,7 @@
   let selectedBlock = $state('');
 
   // Navigation state
+  let locatorProperties = $state([]);
   let isNavigating = $state(false);
   let currentRoute = $state(null);
   let externalRoute = $state(null);
@@ -446,6 +448,11 @@ map.once('idle', async () => {
       goto(`/graves/${name}`);
   });
 
+ map.once('idle', async () => {
+    await zoomOutToLocatorBounds();
+    await loadLocatorBlockFeatures();
+  });
+
   // 🔹 Cursor styles for locator blocks
   map.on('mouseenter', 'locator-blocks', () => {
     map.getCanvas().style.cursor = 'pointer';
@@ -507,7 +514,6 @@ map.once('idle', async () => {
   }
 });
 
-
     // Mouse move handler
     map.on('mousemove', (e) => {
       coordinates = {
@@ -525,6 +531,54 @@ map.once('idle', async () => {
       showError('Map error: ' + e.error.message);
     });
   }
+async function zoomOutToLocatorBounds() {
+  const bounds = [
+    [120.9749, 14.4705], // Southwest: lng, lat
+    [120.9770, 14.4729]  // Northeast: lng, lat
+  ];
+
+  // Fit the map to the given bounds with animation and padding
+  map.fitBounds(bounds, {
+    padding: 50,
+    animate: true
+  });
+
+  return new Promise(resolve => {
+    // Wait for map rendering to finish
+    map.once('idle', () => {
+      console.log('[zoomOutToLocatorBounds] Map is idle. Waiting extra delay...');
+
+      // Optional extra delay for visual completion
+      setTimeout(() => {
+        console.log('[zoomOutToLocatorBounds] Delay done. Proceeding...');
+        resolve();
+      }, 5000); // Increase if needed
+    });
+  });
+}
+
+async function loadLocatorBlockFeatures() {
+  try {
+    const features = map.queryRenderedFeatures({ layers: ['locator-blocks'] });
+
+    locatorProperties = features
+      .filter(f => f.properties?.name) // Only features with a name
+      .map(f => ({
+        id: f.id,
+        name: f.properties.name,
+        lng: f.geometry.coordinates[0],
+        lat: f.geometry.coordinates[1],
+        properties: f.properties,
+        geometry: f.geometry
+      }));
+
+    console.log('Loaded locator block features:', locatorProperties.length);
+  } catch (error) {
+    console.error('Error loading locator block features:', error);
+  }
+}
+
+
 
   async function loadFeaturesFromMap() {
     if (!map) return;
@@ -1525,7 +1579,7 @@ $effect(() => {
       </div>
 
       <!-- Grave Block Search -->
-<!--      <div>
+      <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1">
           🔍 Looking for:
           <span class="ml-1 font-normal text-gray-600">
@@ -1547,7 +1601,19 @@ $effect(() => {
   </svg>
 </button>
 
-        </label>  -->
+        </label>  
+{#if locatorProperties.length === 0}
+  <p>No locator blocks found.</p>
+{:else}
+  <p>Total locator blocks: {locatorProperties.length}</p>
+  {#each locatorProperties as property (property.id)}
+    <div>
+        <!-- {JSON.stringify(property, null, 2)} -->
+    </div>
+  {/each}
+{/if}
+
+
 
 
 <!-- Dropdown Content -->
