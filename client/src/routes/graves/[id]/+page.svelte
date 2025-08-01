@@ -129,82 +129,81 @@ map.on('moveend', () => {
   waitForRoutingData();
 });
 
-// ✅ Enhanced auto erase and putback function
 async function autoEraseAndPutBack() {
   const originalMatchName = matchName;
   const originalSelectedProperty = selectedProperty;
-  
+
   console.log('🔄 Auto erase and putback started for:', originalMatchName);
-  
+
   // Step 1: Clear the values
   matchName = '';
   selectedProperty = null;
   await zoomOutToLocatorBounds();
 
-  
-  // Step 2: Wait for map to fully load AND features to be loaded
+  // Step 2: Wait for map and features to load
   const waitForMapAndFeatures = async () => {
     let attempts = 0;
     const maxAttempts = 100; // 20 seconds max wait
-    
+
     while (attempts < maxAttempts) {
       console.log(`⏳ Attempt ${attempts + 1}: isMapLoaded=${isMapLoaded}, properties.length=${properties.length}`);
-      
-      // Check if map is loaded and we have features from the map
+
       if (isMapLoaded && properties.length > 0) {
         console.log('✅ Map and properties are ready!');
         return true;
       }
-      
+
       await new Promise(resolve => setTimeout(resolve, 200));
       attempts++;
     }
-    
+
     console.error('❌ Timeout waiting for map and properties');
     return false;
   };
-  
+
   const ready = await waitForMapAndFeatures();
-  
   if (!ready) {
-    // Restore original values if failed
     matchName = originalMatchName;
     selectedProperty = originalSelectedProperty;
     console.error('❌ Failed to load, restoring original values');
     return;
   }
-  
-  // Step 3: Wait a bit more then restore
-  await new Promise(resolve => setTimeout(resolve, 500));
-  
-  console.log('🔍 Searching for property:', originalMatchName);
-  console.log('📋 Available properties:', properties.map(p => p.name));
-  
-  // Find the property and restore
-  const foundProperty = properties.find(p => 
-    p.name.toLowerCase() === originalMatchName.toLowerCase()
-  );
-  
+
+  // Step 3: Retry logic to search for the property
+  const maxSearchAttempts = 15;
+  let searchAttempt = 0;
+  let foundProperty = null;
+
+  while (searchAttempt < maxSearchAttempts && !foundProperty) {
+    console.log(`🔁 Search attempt ${searchAttempt + 1} for:`, originalMatchName);
+
+    foundProperty = properties.find(p =>
+      p.name?.toLowerCase() === originalMatchName.toLowerCase()
+    );
+
+    if (!foundProperty) {
+      // Try exact case-sensitive match as fallback
+      foundProperty = properties.find(p => p.name === originalMatchName);
+    }
+
+    if (foundProperty) break;
+
+    await new Promise(resolve => setTimeout(resolve, 300)); // wait a bit before retrying
+    searchAttempt++;
+  }
+
+  // Step 4: Restore values
   if (foundProperty) {
     selectedProperty = foundProperty;
     matchName = originalMatchName;
-    console.log('✅ Successfully restored property:', foundProperty);
+    console.log('✅ Successfully restored property after search:', foundProperty);
   } else {
-    // Try exact match without case sensitivity
-    const exactMatch = properties.find(p => p.name === originalMatchName);
-    
-    if (exactMatch) {
-      selectedProperty = exactMatch;
-      matchName = originalMatchName;
-      console.log('✅ Found exact match:', exactMatch);
-    } else {
-      // Just restore the matchName
-      matchName = originalMatchName;
-      console.log('⚠️ Property not found in array, restored matchName only');
-      console.log('Available properties:', properties.map(p => `"${p.name}"`));
-    }
+    matchName = originalMatchName;
+    console.log('⚠️ Property not found even after retries. Restored matchName only.');
+    console.log('📋 Available properties:', properties.map(p => `"${p.name}"`));
   }
 }
+
 function extractLngLatFromGeometry(geometry) {
     try {
       // Handle different geometry types
