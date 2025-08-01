@@ -1654,70 +1654,70 @@ function handleSearchInput(event) {
       </div>
 
       <!-- Grave Block Search -->
-      <div>
+  <!--  <div>
         <label class="block text-sm font-semibold text-gray-700 mb-1">
           🔍 Looking for:
           <span class="ml-1 font-normal text-gray-600">
             {matchName || selectedProperty?.name || 'No block selected'}
           </span>
-<button 
-  onclick={toggleSearchDropdown}
-  class="w-full flex items-center justify-between px-3 py-2 bg-transparent border border-transparent rounded-md hover:bg-gray-100 focus:ring-0 focus:outline-none text-sm"
->
-  <div class="flex items-center space-x-2 text-gray-500">
-  </div>
-  <svg 
-    class="w-4 h-4 text-gray-400 transform transition-transform duration-200 {showSearchDropdown ? 'rotate-180' : ''}" 
-    fill="none" 
-    stroke="currentColor" 
-    viewBox="0 0 24 24"
-  >
-    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
-  </svg>
-</button>
-
-        </label>  
-<!-- Dropdown Content -->
-  <div class="mt-2 bg-white border border-gray-300 rounded-lg shadow-lg p-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
-    <!-- Grave Block Search -->
-    <div>
-      <label class="block text-sm font-semibold text-gray-700 mb-1">
-        🔍 Looking for:
-        <span class="ml-1 font-normal text-gray-600">
-          {matchName || selectedProperty?.name || 'No block selected'}
-        </span>
-      </label>
-
-      <label for="search" class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
-        Search Grave Block
-      </label>
-<input
-  id="search"
-  type="text"
-  placeholder="Type grave block name..."
-  class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-oninput={(e) => handleSearchInput}
-/>
-
-
-      <!-- Block Selection -->
-      <div class="w-full">
-        <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
-          List of Grave Block
-        </label>
-        <select
-          bind:value={selectedProperty}
-          class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+        <button 
+          onclick={toggleSearchDropdown}
+          class="w-full flex items-center justify-between px-3 py-2 bg-transparent border border-transparent rounded-md hover:bg-gray-100 focus:ring-0 focus:outline-none text-sm"
         >
-          <option value={null}>Select a block</option>
-  {#each properties as property, index (index)}
-    <option value={property}>{property.name}</option>
-  {/each}
-        </select>
-      </div>
-    </div>
-  </div>
+          <div class="flex items-center space-x-2 text-gray-500">
+          </div>
+          <svg 
+            class="w-4 h-4 text-gray-400 transform transition-transform duration-200 {showSearchDropdown ? 'rotate-180' : ''}" 
+            fill="none" 
+            stroke="currentColor" 
+            viewBox="0 0 24 24"
+          >
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path>
+          </svg>
+        </button>
+        </label>  -->
 
+      {#if showSearchDropdown}
+      <!-- Dropdown Content -->
+        <div class="mt-2 bg-white border border-gray-300 rounded-lg shadow-lg p-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
+          <!-- Grave Block Search -->
+          <div>
+            <label class="block text-sm font-semibold text-gray-700 mb-1">
+              🔍 Looking for:
+              <span class="ml-1 font-normal text-gray-600">
+                {matchName || selectedProperty?.name || 'No block selected'}
+              </span>
+            </label>
+
+            <label for="search" class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
+              Search Grave Block
+            </label>
+            <input
+              id="search"
+              type="text"
+              placeholder="Type grave block name..."
+              class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+            oninput={(e) => handleSearchInput}
+            />
+
+            <!-- Block Selection -->
+            <div class="w-full">
+              <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
+                List of Grave Block
+              </label>
+              <select
+                bind:value={selectedProperty}
+                class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
+              >
+                <option value={null}>Select a block</option>
+        {#each properties as property, index (index)}
+          <option value={property}>{property.name}</option>
+        {/each}
+              </select>
+            </div>
+          </div>
+        </div>
+      {/if}
       <!-- Navigation Controls -->
       <div class="col-span-1 lg:col-span-2 flex flex-col gap-2">
         <button
