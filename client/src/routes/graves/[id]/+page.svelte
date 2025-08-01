@@ -105,26 +105,7 @@ onMount(async () => {
     navigator.startNavigationUpdates(destination, chapel);
   };
 
-map.on('moveend', () => {
-  console.log('🌀 moveend triggered');
 
-  const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
-  console.log('🔍 visible features:', features.length);
-
-  properties = features.map(f => ({
-    id: f.id,
-    name: f.properties.name,
-    geometry: f.geometry,
-    properties: f.properties
-  }));
-
-  // Debugging search
-  if (matchName) {
-    const val = matchName.toLowerCase();
-    selectedProperty = properties.find(p => p.name.toLowerCase().includes(val)) ?? null;
-    console.log('🔎 matched search:', selectedProperty);
-  }
-});
 
   waitForRoutingData();
 });
@@ -428,22 +409,26 @@ map.once('idle', async () => {
   // 🔹 Load cemetery paths for route logic
   await loadLineStringFeatures();
 
-  async function loadLineStringFeatures() {
-    try {
-      const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
-      lineStringFeatures = features
-        .filter(f => f.geometry.type === 'LineString')
-        .map(f => ({
-          id: f.id,
-          coordinates: f.geometry.coordinates,
-          properties: f.properties,
-          geometry: f.geometry
-        }));
-      console.log('Loaded LineString features:', lineStringFeatures.length);
-    } catch (error) {
-      console.error('Error loading LineString features:', error);
-    }
+async function loadLineStringFeatures() {
+  try {
+    const features = map.querySourceFeatures('cemetery', {
+      sourceLayer: 'cemetery-paths',
+      filter: ['==', '$type', 'LineString']
+    });
+
+    lineStringFeatures = features.map(f => ({
+      id: f.id,
+      coordinates: f.geometry.coordinates,
+      properties: f.properties,
+      geometry: f.geometry
+    }));
+
+    console.log('✅ Loaded LineString features:', lineStringFeatures.length);
+  } catch (error) {
+    console.error('❌ Error loading LineString features:', error);
   }
+}
+
 
   // 🔹 Handle map click on locator block
   map.on('click', 'locator-blocks', (e) => {
@@ -465,8 +450,6 @@ map.once('idle', async () => {
     startNavigationToProperty(property);
     showSuccess(`Selected locator: ${name}`);
 
-      // 🔥 Navigate to /graves/{block} in the URL
-      goto(`/graves/${name}`);
   });
 
  map.once('idle', async () => {
@@ -861,6 +844,7 @@ async function startNavigationToProperty(property) {
   } finally {
     isLoading = false;
   }
+  goto(`/graves/${name}`);
 }
 
 
@@ -1530,25 +1514,18 @@ function handleSearchInput(event) {
         p.name.toLowerCase().includes(val.toLowerCase())
       );
       
-      // Only auto-select if exact match
-      if (foundProperty && foundProperty.name.toLowerCase() === val.toLowerCase()) {
-        selectedProperty = foundProperty;
-      }
+    // If only one result matches, auto-select it
+    if (filteredProperties.value.length === 1) {
+        selectedPropertyId.value = filteredProperties.value[0].id;
+    }
       // Don't clear selectedProperty for partial matches to avoid flickering
     } else {
       selectedProperty = null;
     }
-  }, 300);
+  }, 5000);
 }
 
-// ✅ Optional: Auto-populate on properties load
-$effect(() => {
-  if (properties.length > 0 && !selectedProperty && !matchName) {
-    // Auto-select first property if needed
-    // selectedProperty = properties[0];
-    // matchName = properties[0].name;
-  }
-});
+
 
   // ✅ Toggle dropdown function
   function toggleSearchDropdown() {
@@ -1558,6 +1535,9 @@ $effect(() => {
   $effect(() => {
     if (selectedProperty?.name && selectedProperty.name !== matchName) {
       matchName = selectedProperty.name;
+          if (selectedProperty.value) {
+        searchQuery.value = selectedProperty.value.name;
+    }
     }
   });
 </script>
@@ -1626,20 +1606,6 @@ $effect(() => {
 </button>
 
         </label>  
-{#if locatorProperties.length === 0}
-  <p>No locator blocks found.</p>
-{:else}
-  <p>Total locator blocks: {locatorProperties.length}</p>
-  {#each locatorProperties as property (property.id)}
-    <div>
-        <!-- {JSON.stringify(property, null, 2)} -->
-    </div>
-  {/each}
-{/if}
-
-
-
-
 <!-- Dropdown Content -->
   <div class="mt-2 bg-white border border-gray-300 rounded-lg shadow-lg p-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
     <!-- Grave Block Search -->
@@ -1661,18 +1627,18 @@ $effect(() => {
   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
   oninput={(e) => {
     const val = e.target.value.trim().toLowerCase();
-      const match = properties.find(p =>
-        p.name?.toLowerCase().includes(val)
-      );
+    const match = properties.find(p =>
+      p.name?.toLowerCase().includes(val)
+    );
     if (match) {
       selectedProperty = match;
-      selectedPropertyId = match.id;
     } else {
       selectedProperty = null;
-      selectedPropertyId = "";
     }
   }}
 />
+
+
 
       <!-- Block Selection -->
       <div class="w-full">
@@ -1684,9 +1650,9 @@ $effect(() => {
           class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
         >
           <option value={null}>Select a block</option>
-          {#each properties as property (property.id)}
-            <option value={property}>{property.name}</option>
-          {/each}
+  {#each properties as property, index (index)}
+    <option value={property}>{property.name}</option>
+  {/each}
         </select>
       </div>
     </div>
