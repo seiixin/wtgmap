@@ -4,8 +4,8 @@
   import { tick } from 'svelte';
   import { goto } from '$app/navigation';
 
-
   // Svelte 5 runes
+  let showConfirm = false;
   let showSearchDropdown = $state(false);
   let matchName = $state('');
   let grave;
@@ -79,6 +79,10 @@ onMount(async () => {
   // ✅ Wait for map to be fully initialized
   await new Promise(resolve => setTimeout(resolve, 100));
   initializeMap();
+  map.on('load', () => {
+  loadSearchableFeatures();
+  });
+
 
   // ✅ Auto erase and putback function when map loads
   if (selectedBlock) {
@@ -153,36 +157,27 @@ async function autoEraseAndPutBack() {
     return;
   }
   
-  // Step 3: Wait a bit more then restore
-  await new Promise(resolve => setTimeout(resolve, 500));
-  
-  console.log('🔍 Searching for property:', originalMatchName);
-  console.log('📋 Available properties:', properties.map(p => p.name));
-  
-  // Find the property and restore
-  const foundProperty = properties.find(p => 
-    p.name.toLowerCase() === originalMatchName.toLowerCase()
-  );
-  
-  if (foundProperty) {
-    selectedProperty = foundProperty;
-    matchName = originalMatchName;
-    console.log('✅ Successfully restored property:', foundProperty);
-  } else {
-    // Try exact match without case sensitivity
-    const exactMatch = properties.find(p => p.name === originalMatchName);
-    
-    if (exactMatch) {
-      selectedProperty = exactMatch;
-      matchName = originalMatchName;
-      console.log('✅ Found exact match:', exactMatch);
-    } else {
-      // Just restore the matchName
-      matchName = originalMatchName;
-      console.log('⚠️ Property not found in array, restored matchName only');
-      console.log('Available properties:', properties.map(p => `"${p.name}"`));
-    }
-  }
+// Step 3: Wait a bit more then restore
+await new Promise(resolve => setTimeout(resolve, 500));
+
+console.log('🔍 Searching for property:', originalMatchName);
+console.log('📋 Available properties:', properties.map(p => p.name));
+
+// Use the same filter logic from the input oninput
+const val = originalMatchName.trim().toLowerCase();
+const foundProperty = properties.find(p =>
+  typeof p.name === 'string' && p.name.toLowerCase().includes(val)
+);
+
+if (foundProperty) {
+  selectedProperty = foundProperty;
+  matchName = originalMatchName;
+  console.log('✅ Successfully restored property:', foundProperty);
+} else {
+  matchName = originalMatchName;
+  console.log('⚠️ Property not found using input-like filter, restored matchName only');
+  console.log('Available properties:', properties.map(p => `"${p.name}"`));
+}
 }
 function extractLngLatFromGeometry(geometry) {
     try {
@@ -456,10 +451,8 @@ async function loadLineStringFeatures() {
  map.once('idle', async () => {
     await zoomOutToLocatorBounds();
     await loadLocatorBlockFeatures();
+    await loadFeaturesFromMap()
   });
-
-
-
 
   // 🔹 Cursor styles for locator blocks
   map.on('mouseenter', 'locator-blocks', () => {
@@ -566,27 +559,33 @@ async function zoomOutToLocatorBounds() {
 }
 
 async function loadLocatorBlockFeatures() {
-  try {
-    const features = map.queryRenderedFeatures({ layers: ['locator-blocks'] });
+const lineFeatures = map.querySourceFeatures('cemetery-paths', {
+  sourceLayer: 'subdivision-blocks-source',
+  filter: ['==', '$type', 'LineString']
+});
 
-    locatorProperties = features
-      .filter(f => f.properties?.name) // Only features with a name
-      .map(f => ({
-        id: f.id,
-        name: f.properties.name,
-        lng: f.geometry.coordinates[0],
-        lat: f.geometry.coordinates[1],
-        properties: f.properties,
-        geometry: f.geometry
-      }));
+let closestPath = null;
+let minDistance = Infinity;
+let nearestPointOnPath = null;
 
-    console.log('Loaded locator block features:', locatorProperties.length);
-  } catch (error) {
-    console.error('Error loading locator block features:', error);
+lineFeatures.forEach(feature => {
+  const nearestPoint = findNearestPointOnLine(
+    [property.lng, property.lat],
+    feature.geometry.coordinates
+  );
+
+  if (nearestPoint.distance < minDistance) {
+    minDistance = nearestPoint.distance;
+    nearestPointOnPath = nearestPoint;
+    closestPath = {
+      id: feature.id,
+      name: feature.properties?.name || 'Path',
+      coordinates: feature.geometry.coordinates,
+      nearestIndex: nearestPoint.index
+    };
   }
+});
 }
-
-
 
   async function loadFeaturesFromMap() {
     if (!map) return;
@@ -845,6 +844,8 @@ async function startNavigationToProperty(property) {
   } finally {
     isLoading = false;
   }
+
+  
 }
 
 
@@ -957,10 +958,10 @@ function findNearestCemeteryEntry(userCoords, destinationCoords) {
 function isPointInCemetery(coordinates) {
   // Check if point is within any subdivision-block polygon
   const point = turf.point([coordinates.lng, coordinates.lat]);
-  const subdivisionFeatures = map.queryRenderedFeatures(
-    map.project([coordinates.lng, coordinates.lat]), 
-    { layers: ['subdivision-blocks'] }
-  );
+  const subdivisionFeatures = map.querySourceFeatures('subdivision', {
+    sourceLayer: 'subdivision-blocks',
+    filter: ['==', '$type', 'Polygon']
+  });
   return subdivisionFeatures.length > 0;
 }
 
@@ -1135,8 +1136,27 @@ function startNavigationUpdates() {
       }
     }
 
+    // Checking for cemetery
+      if (!isInsideCemetery) {
+        const cemeteryBoundary = getCemeteryBoundary();
+        isInsideCemetery = pointInPolygon(
+          [userLocation.lng, userLocation.lat],
+          cemeteryBoundary
+        );
+
+        if (isInsideCemetery) {
+          showSuccess("Entered cemetery grounds - switching to internal navigation");
+        }
+      }
+
     const remainingDistance = calculateRemainingDistance(closestIndex);
     console.log("📍 Remaining Distance:", remainingDistance.toFixed(2), "meters");
+
+      // Check if arrived
+      if (closestIndex >= currentRoute.coordinates.length - 2) {
+        completeNavigation();
+      }
+
   }, 1000);
 }
 
@@ -1162,15 +1182,41 @@ function calculateRemainingDistance(closestIndex) {
     return 'Continue to destination';
   }
 
-  function completeNavigation() {
-    stopNavigation();
-    showExitPopup = true;
-    showSuccess(`Arrived at ${selectedProperty?.name || 'destination'}`);
-    setTimeout(() => {
-      showSuccess('Navigating to Exit...');
-      startNavigationToProperty(MAIN_ENTRANCE);
-    }, 3000);
+function completeNavigation() {
+  stopNavigation();
+  showExitPopup = true;
+
+  showSuccess(`Arrived at ${selectedProperty?.name || 'destination'}`);
+
+  setTimeout(() => {
+    // Show confirmation dialog before navigating to exit
+    showConfirmation({
+      title: "Navigate to Exit?",
+      message: "Do you want to navigate back to the Main Entrance?",
+      confirmText: "Yes, guide me",
+      cancelText: "No, stay here",
+      onConfirm: () => {
+        const MAIN_ENTRANCE = findNearestEntrance();
+        showSuccess(`Navigating to ${MAIN_ENTRANCE.name}...`);
+        startNavigationToProperty(MAIN_ENTRANCE);
+      },
+      onCancel: () => {
+        showSuccess("Navigation ended. You may exit at your own pace.");
+      }
+    });
+  }, 3000);
+}
+
+function showConfirmation({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
+  // Example: using a custom modal UI
+  const confirmed = window.confirm(`${title}\n\n${message}`);
+  if (confirmed) {
+    onConfirm();
+  } else {
+    onCancel();
   }
+}
+
 
   async function getMapboxDirections(start, end) {
     // Use walking profile to avoid "flying inside cemetery" and get more appropriate paths
@@ -1499,7 +1545,34 @@ $effect(() => {
     matchName = selectedProperty.name;
   }
 });
-// ✅ Enhanced search handler with debounce
+
+let searchableFeatures = [];
+
+async function loadSearchableFeatures() {
+  // Wait until the map has fully loaded
+  if (!map || !map.isStyleLoaded()) {
+    await new Promise(resolve => {
+      map.once('idle', resolve);
+    });
+  }
+
+  // Query rendered features from a specific layer (e.g., 'cemetery-paths')
+  const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
+
+  // Filter only LineString geometries with a valid name property
+  searchableFeatures = features
+    .filter(f => f.geometry?.type === 'LineString' && f.properties?.name)
+    .map(f => ({
+      id: f.id,
+      name: f.properties.name,
+      coordinates: f.geometry.coordinates,
+      properties: f.properties,
+      geometry: f.geometry
+    }));
+
+  console.log('✅ searchableFeatures loaded:', searchableFeatures);
+}
+
 function handleSearchInput(event) {
   const val = event.target.value.trim();
   matchName = val;
@@ -1514,18 +1587,16 @@ function handleSearchInput(event) {
         p.name.toLowerCase().includes(val.toLowerCase())
       );
       
-    // If only one result matches, auto-select it
-    if (filteredProperties.value.length === 1) {
-        selectedPropertyId.value = filteredProperties.value[0].id;
-    }
+      // Only auto-select if exact match
+      if (foundProperty && foundProperty.name.toLowerCase() === val.toLowerCase()) {
+        selectedProperty = foundProperty;
+      }
       // Don't clear selectedProperty for partial matches to avoid flickering
     } else {
       selectedProperty = null;
     }
-  }, 5000);
+  }, 300);
 }
-
-
 
   // ✅ Toggle dropdown function
   function toggleSearchDropdown() {
@@ -1625,19 +1696,8 @@ function handleSearchInput(event) {
   type="text"
   placeholder="Type grave block name..."
   class="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500"
-  oninput={(e) => {
-    const val = e.target.value.trim().toLowerCase();
-    const match = properties.find(p =>
-      p.name?.toLowerCase().includes(val)
-    );
-    if (match) {
-      selectedProperty = match;
-    } else {
-      selectedProperty = null;
-    }
-  }}
+oninput={(e) => handleSearchInput}
 />
-
 
 
       <!-- Block Selection -->
