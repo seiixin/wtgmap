@@ -449,6 +449,7 @@ async function loadLineStringFeatures() {
 
     startNavigationToProperty(property);
     showSuccess(`Selected locator: ${name}`);
+      goto(`/graves/${name}`);
 
   });
 
