@@ -844,7 +844,6 @@ async function startNavigationToProperty(property) {
   } finally {
     isLoading = false;
   }
-  goto(`/graves/${name}`);
 }
 
 
