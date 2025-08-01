@@ -105,6 +105,27 @@ onMount(async () => {
     navigator.startNavigationUpdates(destination, chapel);
   };
 
+map.on('moveend', () => {
+  console.log('🌀 moveend triggered');
+
+  const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
+  console.log('🔍 visible features:', features.length);
+
+  properties = features.map(f => ({
+    id: f.id,
+    name: f.properties.name,
+    geometry: f.geometry,
+    properties: f.properties
+  }));
+
+  // Debugging search
+  if (matchName) {
+    const val = matchName.toLowerCase();
+    selectedProperty = properties.find(p => p.name.toLowerCase().includes(val)) ?? null;
+    console.log('🔎 matched search:', selectedProperty);
+  }
+});
+
   waitForRoutingData();
 });
 
@@ -118,6 +139,8 @@ async function autoEraseAndPutBack() {
   // Step 1: Clear the values
   matchName = '';
   selectedProperty = null;
+  await zoomOutToLocatorBounds();
+
   
   // Step 2: Wait for map to fully load AND features to be loaded
   const waitForMapAndFeatures = async () => {
@@ -452,6 +475,9 @@ map.once('idle', async () => {
     await zoomOutToLocatorBounds();
     await loadLocatorBlockFeatures();
   });
+
+
+
 
   // 🔹 Cursor styles for locator blocks
   map.on('mouseenter', 'locator-blocks', () => {
@@ -1617,7 +1643,6 @@ $effect(() => {
 
 
 <!-- Dropdown Content -->
-{#if showSearchDropdown}
   <div class="mt-2 bg-white border border-gray-300 rounded-lg shadow-lg p-4 space-y-4 animate-in slide-in-from-top-2 duration-200">
     <!-- Grave Block Search -->
     <div>
@@ -1640,6 +1665,7 @@ $effect(() => {
         oninput={handleSearchInput}
       />
 
+
       <!-- Block Selection -->
       <div class="w-full">
         <label class="block text-sm font-semibold text-gray-700 mb-2 mt-4">
@@ -1657,7 +1683,6 @@ $effect(() => {
       </div>
     </div>
   </div>
-{/if}
 
       <!-- Navigation Controls -->
       <div class="col-span-1 lg:col-span-2 flex flex-col gap-2">
