@@ -48,8 +48,6 @@
   let progressPercentage = $state(0);
   let directDistanceToDestination = $state(0);
   let showExitPopup = $state(false);
-  let chapelCoords = [120.9765, 14.47279];
-  import { routeCoords, routeSteps, chapelArrived, error, isRouting } from '$lib/stores';
   
   let matchProperty = $derived(() => 
     matchName ? propertyFeatures.find((p) => p.name === matchName) : null
@@ -92,17 +90,6 @@ onMount(async () => {
     }
 
     console.log('✅ Routing data ready. Starting navigation.');
-
-    navigator = new ChapelRouteNavigator({
-      userLocation,
-      routeCoords,
-      routeSteps,
-      chapelArrived,
-      error,
-      isRouting
-    });
-
-    navigator.startNavigationUpdates(destination, chapel);
   };
 
 
@@ -616,38 +603,6 @@ lineFeatures.forEach(feature => {
     propertyFeatures = processedProperties;
     console.log(`Loaded ${properties.length} locator blocks`);
   }
-async function selectBlockByName(blockName) {
-  if (!map || !blockName) return false;
-
-  const features = map.querySourceFeatures('locator-blocks-source', {
-    sourceLayer: 'locator-blocks',
-    filter: ['==', ['get', 'name'], blockName]
-  });
-
-  if (features.length === 0) return false;
-
-  const feature = features[0];
-  const coordinates = feature.geometry.coordinates;
-
-  selectedProperty.set({
-    id: feature.id || feature.properties.id || blockName,
-    name: feature.properties.name,
-    lng: coordinates[0],
-    lat: coordinates[1],
-    feature
-  });
-
-  matchName = feature.properties.name;
-
-  map.flyTo({
-    center: coordinates,
-    zoom: 20,
-    essential: true
-  });
-
-  showSuccess(`Selected locator: ${feature.properties.name}`);
-  return true;
-}
 
 let destinationMarker = null;
 
@@ -713,16 +668,6 @@ function navigateToProperty(property) {
   selectedProperty = property;
   matchName = property.name;
 
-  selectBlockByName(property.name)
-    .then(success => {
-      if (success) {
-        showOnlySelectedPath({ id: property.id || property.feature?.properties?.id });
-        startNavigationToProperty(property);
-        showSuccess(`Selected locator: ${property.name}`);
-      } else {
-        showError(`Block not found: ${property.name}`);
-      }
-    });
 }
 function handleSearchButtonClick(name) {
   if (!name) {
@@ -748,24 +693,10 @@ function handleSearchButtonClick(name) {
   navigateToProperty(property);
 }
 async function startNavigationToProperty(property) {
-  // ✅ Enhanced: Accept either selectedProperty or search by matchName
-  let targetProperty = property;
-  
-  // If no property passed but may matchName, search for it
-  if (!targetProperty && matchName && matchName.trim()) {
-    targetProperty = properties.find(
-      (p) => p.name.toLowerCase() === matchName.toLowerCase()
-    );
-    
-    if (!targetProperty) {
-      showError(`Block "${matchName}" not found. Please check the name or select from dropdown.`);
-      return;
-    }
-  }
-  
-  // Original validation
+  const targetProperty = property;
+
   if (!targetProperty || !userLocation) {
-    showError('Please enable location tracking and select a property');
+    showError('Please enable location tracking and select a property.');
     return;
   }
 
@@ -775,66 +706,54 @@ async function startNavigationToProperty(property) {
   isNavigating = true;
 
   try {
+    const userCoords = [userLocation.lng, userLocation.lat];
     const cemeteryBoundary = getCemeteryBoundary();
-    const userPoint = [userLocation.lng, userLocation.lat];
-    const isInsideCemetery = pointInPolygon(userPoint, cemeteryBoundary);
-
-    const destination = {
-      lng: targetProperty.longitude,  // ✅ Use targetProperty instead of property
-      lat: targetProperty.latitude
-    };
-
-    const navigator = new ChapelRouteNavigator({
-      userLocation,
-      routeCoords,
-      routeSteps,
-      chapelArrived,
-      error,
-      isRouting
-    });
+    isInsideCemetery = pointInPolygon(userCoords, cemeteryBoundary);
 
     if (isInsideCemetery) {
-      // ✅ Route directly inside cemetery
-      await navigateUsingInternalPaths(targetProperty);  // ✅ Use targetProperty
+      // 🛤 Internal navigation only
+      await navigateUsingInternalPaths(targetProperty);
+
+      if (!selectedLineString?.coordinates?.length) {
+        showError('No internal route found.');
+        return;
+      }
 
       currentRoute = {
         coordinates: selectedLineString.coordinates,
         distance: calculatePathDistance(selectedLineString.coordinates),
         steps: createInternalSteps(selectedLineString.coordinates)
       };
-
-      navigator.startNavigationUpdates(destination, null);
     } else {
-      // ✅ Route: user → chapel → property
-      const chapel = {
-        lng: 120.9766,
-        lat: 14.4727,
-        name: "Chapel"
-      };
+      // 🌐 External + internal navigation
+      const entrance = findNearestEntrance();
+      const externalRoute = await getMapboxDirections(userCoords, [entrance.lng, entrance.lat]);
 
-      // Step 1: Route to chapel (outside)
-      const toChapelRoute = await getMapboxDirections(userPoint, [chapel.lng, chapel.lat]);
+      if (!externalRoute?.coordinates?.length) {
+        showError('No external route found.');
+        return;
+      }
 
-      // Step 2: Internal path from chapel to property
-      await navigateUsingInternalPaths(targetProperty);  // ✅ Use targetProperty
+      await navigateUsingInternalPaths(targetProperty);
+
+      if (!selectedLineString?.coordinates?.length) {
+        showError('No internal route found.');
+        return;
+      }
 
       currentRoute = {
-        coordinates: [
-          ...toChapelRoute.coordinates,
-          ...selectedLineString.coordinates
-        ],
-        distance: toChapelRoute.distance + calculatePathDistance(selectedLineString.coordinates),
+        coordinates: [...externalRoute.coordinates, ...selectedLineString.coordinates],
+        distance: externalRoute.distance + calculatePathDistance(selectedLineString.coordinates),
         steps: [
-          ...toChapelRoute.steps,
+          ...externalRoute.steps,
           { instruction: "Enter cemetery grounds", distance: 0 },
           ...createInternalSteps(selectedLineString.coordinates)
         ]
       };
-
-      navigator.startNavigationUpdates(destination, chapel);
     }
 
     displayRoute();
+    startNavigationUpdates();
 
   } catch (err) {
     console.error('Navigation error:', err);
@@ -843,11 +762,7 @@ async function startNavigationToProperty(property) {
   } finally {
     isLoading = false;
   }
-
-  
 }
-
-
   // Route path directions functionality preserved from original
   function getCemeteryBoundary() {
     return [
@@ -1033,52 +948,6 @@ function isPointInCemetery(coordinates) {
     map.fitBounds(bounds, { padding: 100 });
   }
 
-  class ChapelRouteNavigator {
-  constructor({ userLocation, routeCoords, routeSteps, chapelArrived, error, isRouting }) {
-    this.userLocation = userLocation;
-    this.routeCoords = routeCoords;
-    this.routeSteps = routeSteps;
-    this.chapelArrived = chapelArrived;
-    this.error = error;
-    this.isRouting = isRouting;
-    this.isRouting.set(false);
-  }
-
-  async startChapelNavigation(destination, chapel) {
-    this.isRouting.set(true);
-    try {
-      const userCoords = get(this.userLocation);
-      const toChapel = await getRouteBetween(userCoords, chapel);
-      const fromChapel = await getRouteBetween(chapel, destination);
-
-      const mergedCoords = [...toChapel.coordinates, ...fromChapel.coordinates];
-      const mergedSteps = [...toChapel.steps || [], ...fromChapel.steps || []];
-
-      this.routeCoords.set(mergedCoords);
-      this.routeSteps.set(mergedSteps);
-      this.isRouting.set(false);
-    } catch (err) {
-      this.error.set(err.message);
-      this.isRouting.set(false);
-    }
-  }
-
-  startNavigationUpdates(destination, chapel) {
-    setInterval(() => {
-      const coords = get(this.userLocation);
-      if (!coords) return;
-
-      const atChapel = this.isNear(coords, chapel);
-      if (atChapel) this.chapelArrived.set(true);
-    }, 5000);
-  }
-
-  isNear(coordA, coordB) {
-    const dx = coordA.lng - coordB.lng;
-    const dy = coordA.lat - coordB.lat;
-    return Math.sqrt(dx * dx + dy * dy) < 0.0002;
-  }
-}
 
 function enforceRouteFromGate(userPoint, routeCoordinates, gateCoordinate) {
   // If user is near the gate, start the route from there
@@ -1104,38 +973,25 @@ function enforceRouteFromGate(userPoint, routeCoordinates, gateCoordinate) {
 function startNavigationUpdates() {
   if (directionUpdateInterval) clearInterval(directionUpdateInterval);
 
-  directionUpdateInterval = setInterval(async () => {
-    if (!isTracking || !userLocation || !currentRoute) return;
+  directionUpdateInterval = setInterval(() => {
+      if (!isTracking || !userLocation || !currentRoute) return;
 
-    const chapelCoords = [120.9765, 14.47279]; // 🎯 Target
-    const userCoords = [userLocation.lng, userLocation.lat];
-    const destination = currentRoute.coordinates.at(-1);
+      // Find closest point on route
+      const { closestIndex, distance } = findClosestPointOnRoute(
+        [userLocation.lng, userLocation.lat],
+        currentRoute.coordinates
+      );
 
-    // ✅ Always use the most accurate closest point
-    const { closestIndex, closestPoint } = findClosestPointOnRoute(userCoords, currentRoute.coordinates);
-    const remainingCoords = currentRoute.coordinates.slice(closestIndex);
+      // Update direct distance to destination (straight line)
+      const destination = currentRoute.coordinates[currentRoute.coordinates.length - 1];
+      directDistanceToDestination = calculateDistance([userLocation.lng, userLocation.lat], destination);
 
-    // 🔁 Check if chapel is still ahead in the route
-    const chapelStillAhead = remainingCoords.some(coord =>
-      calculateDistance(coord, chapelCoords) < 20
-    );
+      // Calculate progress percentage (0-100)
+      const totalDistance = currentRoute.distance;
+      const traveledDistance = calculatePathDistance(currentRoute.coordinates.slice(0, closestIndex + 1));
+      progressPercentage = Math.min(100, Math.max(0, (traveledDistance / totalDistance) * 100));
 
-    if (!hasReroutedToChapel && !chapelStillAhead) {
-      console.log("⏳ Attempting to reroute via chapel...");
-
-      const newCoords = await modifyRouteToPassThroughChapel(userCoords, chapelCoords, destination);
-
-      if (newCoords && newCoords.length > 1) {
-        currentRoute.coordinates = newCoords;
-        hasReroutedToChapel = true;
-        console.log("✅ Route now includes chapel");
-        displayRoute();
-      } else {
-        console.warn("⚠️ Failed to reroute via chapel");
-      }
-    }
-
-    // Checking for cemetery
+      // Checking for cemetery
       if (!isInsideCemetery) {
         const cemeteryBoundary = getCemeteryBoundary();
         isInsideCemetery = pointInPolygon(
@@ -1148,15 +1004,15 @@ function startNavigationUpdates() {
         }
       }
 
-    const remainingDistance = calculateRemainingDistance(closestIndex);
-    console.log("📍 Remaining Distance:", remainingDistance.toFixed(2), "meters");
+      // Update navigation state
+      distanceToDestination = calculateRemainingDistance(closestIndex);
+      currentStep = getCurrentStep(closestIndex);
 
       // Check if arrived
       if (closestIndex >= currentRoute.coordinates.length - 2) {
         completeNavigation();
       }
-
-  }, 1000);
+    }, 1000);
 }
 
 function calculateRemainingDistance(closestIndex) {
@@ -1247,19 +1103,6 @@ function showConfirmation({ title, message, confirmText, cancelText, onConfirm, 
   return (endLng - startLng) > 0.001;
 }
 
-function insertChapelAlways(route, chapelCoords) {
-  const coords = route.geometry.coordinates;
-
-  const newCoords = [
-    ...coords.slice(0, Math.floor(coords.length / 2)),
-    chapelCoords,
-    ...coords.slice(Math.floor(coords.length / 2))
-  ];
-
-  route.geometry.coordinates = newCoords;
-
-  return route;
-}
 
 function findClosestPointOnRoute(userPoint, routeCoordinates) {
   let closestPoint = null;
@@ -1293,18 +1136,6 @@ async function getRouteBetween(start, end) {
 
   return data.routes[0].geometry.coordinates;
 }
-
-
-// Example pseudo-code
-async function modifyRouteToPassThroughChapel(start, chapel, end) {
-  const routeToChapel = await getRoute(start, chapel);
-  const routeToEnd = await getRoute(chapel, end);
-
-  if (!routeToChapel || !routeToEnd) return null;
-
-  return [...routeToChapel.slice(0, -1), ...routeToEnd]; // merge routes cleanly
-}
-
 
 
 function findClosestForwardPoint(userPoint, routeCoordinates, minIndex = 0) {
