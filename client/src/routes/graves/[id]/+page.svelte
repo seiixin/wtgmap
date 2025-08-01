@@ -79,10 +79,6 @@ onMount(async () => {
   // ✅ Wait for map to be fully initialized
   await new Promise(resolve => setTimeout(resolve, 100));
   initializeMap();
-  map.on('load', () => {
-  loadSearchableFeatures();
-  });
-
 
   // ✅ Auto erase and putback function when map loads
   if (selectedBlock) {
@@ -112,6 +108,9 @@ onMount(async () => {
 
 
   waitForRoutingData();
+
+    
+
 });
 
 // ✅ Enhanced auto erase and putback function
@@ -1548,30 +1547,6 @@ $effect(() => {
 
 let searchableFeatures = [];
 
-async function loadSearchableFeatures() {
-  // Wait until the map has fully loaded
-  if (!map || !map.isStyleLoaded()) {
-    await new Promise(resolve => {
-      map.once('idle', resolve);
-    });
-  }
-
-  // Query rendered features from a specific layer (e.g., 'cemetery-paths')
-  const features = map.queryRenderedFeatures({ layers: ['cemetery-paths'] });
-
-  // Filter only LineString geometries with a valid name property
-  searchableFeatures = features
-    .filter(f => f.geometry?.type === 'LineString' && f.properties?.name)
-    .map(f => ({
-      id: f.id,
-      name: f.properties.name,
-      coordinates: f.geometry.coordinates,
-      properties: f.properties,
-      geometry: f.geometry
-    }));
-
-  console.log('✅ searchableFeatures loaded:', searchableFeatures);
-}
 
 function handleSearchInput(event) {
   const val = event.target.value.trim();
