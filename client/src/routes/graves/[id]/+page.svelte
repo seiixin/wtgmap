@@ -716,18 +716,26 @@ async function startNavigationToProperty(property) {
     let steps = [];
     let totalDistance = 0;
 
+    // --- South or East Check ---
+    const allMiddlePoints = [...firstLayerPoints, ...secondLayerPoints];
+    const maxMiddleLng = Math.max(...allMiddlePoints.map(p => p.lng));
+    const minMiddleLat = Math.min(...allMiddlePoints.map(p => p.lat));
+    const isSouthOrEast = property.lat < minMiddleLat || property.lng > maxMiddleLng;
+
+    // --- If inside, go internal directly ---
     if (isInside) {
       await navigateUsingInternalPaths(property);
     } else {
+      // Step 1: Route to entrance
       const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
       if (!toEntrance?.coordinates?.length) {
         showError('Failed to get route to entrance.');
         return;
       }
 
-      const entranceDistanceBefore = haversineDistance(userCoords, targetCoords);
-      const entranceDistanceAfter = haversineDistance(entranceCoords, targetCoords);
-      if (entranceDistanceAfter >= entranceDistanceBefore) {
+      const entranceBeforeDist = haversineDistance(userCoords, targetCoords);
+      const entranceAfterDist = haversineDistance(entranceCoords, targetCoords);
+      if (entranceAfterDist >= entranceBeforeDist) {
         showError('Routing to entrance moves away from destination.');
         return;
       }
@@ -736,51 +744,48 @@ async function startNavigationToProperty(property) {
       steps.push(...toEntrance.steps);
       totalDistance += toEntrance.distance;
 
-      // 🚫 Avoid middle point logic if destination is very west or very near
-      const minFirstLng = Math.min(...firstLayerPoints.map(p => p.lng));
-      const minSecondLng = Math.min(...secondLayerPoints.map(p => p.lng));
-      const isMoreWestThanAll = property.lng < minFirstLng && property.lng < minSecondLng;
-      const shouldSkipMiddlePoints = isNear || isMoreWestThanAll;
+      // Step 2: Middle route logic
+      const farThreshold = 120; // meters
+      const isFar = entranceAfterDist > farThreshold;
 
-      if (shouldSkipMiddlePoints) {
-        console.warn('Skipping middle points: target is either near or west of middle layers.');
+      if (!isFar || isNear || !isSouthOrEast) {
+        console.warn('Skipping middle points: not far, near, or not south/east enough.');
         await navigateUsingInternalPaths(property, entrance);
       } else {
-        let bestFirst = null;
-        let bestSecond = null;
+        const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords);
 
-        const eastOfAll = property.lng > 120.9762;
-        const westOfDecisionPoint = property.lng < 120.9761;
+        let from = entrance;
 
-        ({ bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords));
-        if (westOfDecisionPoint) bestSecond = null;
-
+        // Step 2a: To first layer point
         if (bestFirst) {
           const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
           if (toFirst?.coordinates?.length) {
             coords.push(...toFirst.coordinates);
             steps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
             totalDistance += toFirst.distance;
+            from = bestFirst;
           }
         }
 
-        if (bestFirst && bestSecond) {
+        // Step 2b: To second layer point
+        if (bestSecond) {
           const toSecond = await getMapboxDirections(
-            [bestFirst.lng, bestFirst.lat],
+            [from.lng, from.lat],
             [bestSecond.lng, bestSecond.lat]
           );
           if (toSecond?.coordinates?.length) {
             coords.push(...toSecond.coordinates);
             steps.push(...toSecond.steps);
             totalDistance += toSecond.distance;
+            from = bestSecond;
           }
         }
 
-        const finalFrom = bestSecond || bestFirst || entrance;
-        await navigateUsingInternalPaths(property, finalFrom);
+        await navigateUsingInternalPaths(property, from);
       }
     }
 
+    // Step 3: Append internal route
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
       stopNavigation();
@@ -798,6 +803,7 @@ async function startNavigationToProperty(property) {
 
     displayRoute();
     startNavigationUpdates();
+
   } catch (err) {
     console.error('Navigation error:', err);
     showError('Failed to create route: ' + (err.message || err));
@@ -806,7 +812,8 @@ async function startNavigationToProperty(property) {
     isLoading = false;
   }
 }
- 
+
+
 
 
 function haversineDistance(coord1, coord2) {
