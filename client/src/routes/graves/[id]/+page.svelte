@@ -709,72 +709,84 @@ async function startNavigationToProperty(property) {
     const entrance = findNearestEntrance();
     const entranceCoords = [entrance.lng, entrance.lat];
 
-    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
-    const isNear = haversineDistance(userCoords, targetCoords) < 50;
+    const referencePoint = { lat: 14.4722, lng: 120.9759 }; // Point F
+    const isSouthOrWest = property.lat < referencePoint.lat || property.lng < referencePoint.lng;
 
-    let coords = [];
-    let steps = [];
+    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const isNearTarget = haversineDistance(userCoords, targetCoords) < 50;
+
+    let routeCoords = [];
+    let navigationSteps = [];
     let totalDistance = 0;
 
-    // --- South or West Check against second layer points only ---
-    const isSouthOfAny = secondLayerPoints.some(p => property.lat < p.lat);
-    const isWestOfAny = secondLayerPoints.some(p => property.lng < p.lng);
-    const shouldUseMiddleRoute = isSouthOfAny || isWestOfAny;
+        // 🔵 Add destination marker
+    if (!destinationMarker) {
+      destinationMarker = new mapboxgl.Marker({ color: '#1d4ed8', scale: 1.2 })
+        .setLngLat(targetCoords)
+        .addTo(map);
+    } else {
+      destinationMarker.setLngLat(targetCoords);
+    }
 
     if (isInside) {
       await navigateUsingInternalPaths(property);
     } else {
-      const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
-      if (!toEntrance?.coordinates?.length) {
+      const routeToEntrance = await getMapboxDirections(userCoords, entranceCoords);
+
+      if (!routeToEntrance?.coordinates?.length) {
         showError('Failed to get route to entrance.');
         return;
       }
 
-      const entranceBeforeDist = haversineDistance(userCoords, targetCoords);
-      const entranceAfterDist = haversineDistance(entranceCoords, targetCoords);
-      if (entranceAfterDist >= entranceBeforeDist) {
+      const distToTargetDirect = haversineDistance(userCoords, targetCoords);
+      const distAfterEntrance = haversineDistance(entranceCoords, targetCoords);
+
+      if (distAfterEntrance >= distToTargetDirect) {
         showError('Routing to entrance moves away from destination.');
         return;
       }
 
-      coords.push(...toEntrance.coordinates);
-      steps.push(...toEntrance.steps);
-      totalDistance += toEntrance.distance;
+      // Route from user to entrance
+      routeCoords.push(...routeToEntrance.coordinates);
+      navigationSteps.push(...routeToEntrance.steps);
+      totalDistance += routeToEntrance.distance;
 
-      const farThreshold = 120; // meters
-      const isFar = entranceAfterDist > farThreshold;
+      const isFarFromEntrance = distAfterEntrance > 120;
 
-      if (!isFar || isNear || !shouldUseMiddleRoute) {
-        console.warn('Skipping middle points: not far, near, or not south/west of 2nd layer.');
+      // Shortcut: If near or not on south/west side, skip middle points
+      if (!isFarFromEntrance || isNearTarget || !isSouthOrWest) {
+        console.warn('Skipping middle points.');
         await navigateUsingInternalPaths(property, entrance);
       } else {
+        // Use middle points
         const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords);
-        let from = entrance;
+        let currentPoint = entrance;
 
         if (bestFirst) {
           const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
           if (toFirst?.coordinates?.length) {
-            coords.push(...toFirst.coordinates);
-            steps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
+            routeCoords.push(...toFirst.coordinates);
+            navigationSteps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
             totalDistance += toFirst.distance;
-            from = bestFirst;
+            currentPoint = bestFirst;
           }
         }
 
         if (bestSecond) {
-          const toSecond = await getMapboxDirections([from.lng, from.lat], [bestSecond.lng, bestSecond.lat]);
+          const toSecond = await getMapboxDirections([currentPoint.lng, currentPoint.lat], [bestSecond.lng, bestSecond.lat]);
           if (toSecond?.coordinates?.length) {
-            coords.push(...toSecond.coordinates);
-            steps.push(...toSecond.steps);
+            routeCoords.push(...toSecond.coordinates);
+            navigationSteps.push(...toSecond.steps);
             totalDistance += toSecond.distance;
-            from = bestSecond;
+            currentPoint = bestSecond;
           }
         }
 
-        await navigateUsingInternalPaths(property, from);
+        await navigateUsingInternalPaths(property, currentPoint);
       }
     }
 
+    // Final check and route construction
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
       stopNavigation();
@@ -785,17 +797,17 @@ async function startNavigationToProperty(property) {
     const internalDistance = calculatePathDistance(internalCoords);
 
     currentRoute = {
-      coordinates: [...coords, ...internalCoords],
+      coordinates: [...routeCoords, ...internalCoords],
       distance: totalDistance + internalDistance,
-      steps: [...steps, ...createInternalSteps(internalCoords)],
+      steps: [...navigationSteps, ...createInternalSteps(internalCoords)],
     };
 
     displayRoute();
     startNavigationUpdates();
 
-  } catch (err) {
-    console.error('Navigation error:', err);
-    showError('Failed to create route: ' + (err.message || err));
+  } catch (error) {
+    console.error('Navigation error:', error);
+    showError('Failed to create route: ' + (error.message || error));
     stopNavigation();
   } finally {
     isLoading = false;
