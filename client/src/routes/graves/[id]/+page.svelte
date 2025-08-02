@@ -704,95 +704,31 @@ async function startNavigationToProperty(property) {
   isNavigating = true;
 
   try {
-    const targetCoords = [property.lng, property.lat];
     const userCoords = [userLocation.lng, userLocation.lat];
-    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const targetCoords = [property.lng, property.lat];
     const entrance = findNearestEntrance();
     const entranceCoords = [entrance.lng, entrance.lat];
 
-    const firstLayerPoints = [
-      { name: "A", lat: 14.4725, lng: 120.9766 },
-      { name: "B", lat: 14.4725, lng: 120.9766 },
-      { name: "C", lat: 14.4725, lng: 120.9764 },
-      { name: "D", lat: 14.4725, lng: 120.9764 },
-      { name: "E", lat: 14.4725, lng: 120.9763 },
-      { name: "F", lat: 14.4725, lng: 120.9762 }
-    ];
-
-    const secondLayerPoints = [
-      { name: "A", lat: 14.4719, lng: 120.9761 },
-      { name: "B", lat: 14.4720, lng: 120.9761 },
-      { name: "C", lat: 14.4720, lng: 120.9760 },
-      { name: "D", lat: 14.4721, lng: 120.9759 },
-      { name: "E", lat: 14.4721, lng: 120.9759 },
-      { name: "F", lat: 14.4721, lng: 120.9759 }
-    ];
-
-    const haversineDistance = (coord1, coord2) => {
-      const toRad = deg => deg * Math.PI / 180;
-      const [lon1, lat1] = coord1;
-      const [lon2, lat2] = coord2;
-      const R = 6371e3;
-      const dLat = toRad(lat2 - lat1);
-      const dLng = toRad(lon2 - lon1);
-      const a = Math.sin(dLat / 2) ** 2 +
-                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-                Math.sin(dLng / 2) ** 2;
-      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    };
-
-    const isNear = haversineDistance(entranceCoords, targetCoords) < 50; // 🎯 NEAR = under 50 meters
-
-    const getBestMiddleRoute = async () => {
-      if (property.lng >= 120.9760 && property.lng <= 120.9761) {
-        return {
-          bestFirst: firstLayerPoints.find(p => p.name === "C"),
-          bestSecond: secondLayerPoints.find(p => p.name === "C")
-        };
-      }
-
-      let bestIndex = -1;
-      let bestDistance = Infinity;
-
-      for (let i = 0; i < firstLayerPoints.length; i++) {
-        const first = firstLayerPoints[i];
-        const second = secondLayerPoints[i];
-
-        const toFirst = await getMapboxDirections(entranceCoords, [first.lng, first.lat]);
-        const toSecond = await getMapboxDirections([first.lng, first.lat], [second.lng, second.lat]);
-        const toTarget = await getMapboxDirections([second.lng, second.lat], targetCoords);
-
-        if (!toFirst || !toSecond || !toTarget) continue;
-
-        const total = toFirst.distance + toSecond.distance + toTarget.distance;
-        if (total < bestDistance) {
-          bestDistance = total;
-          bestIndex = i;
-        }
-      }
-
-      return bestIndex >= 0
-        ? {
-            bestFirst: firstLayerPoints[bestIndex],
-            bestSecond: secondLayerPoints[bestIndex]
-          }
-        : { bestFirst: null, bestSecond: null };
-    };
+    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const isNear = haversineDistance(userCoords, targetCoords) < 50;
 
     let coords = [];
     let steps = [];
     let totalDistance = 0;
 
-    // 🌳 If inside cemetery
     if (isInside) {
       await navigateUsingInternalPaths(property);
-    }
-
-    // 🏁 If outside but NEAR — go entrance ➝ property directly
-    else if (isNear) {
+    } else {
       const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
       if (!toEntrance?.coordinates?.length) {
         showError('Failed to get route to entrance.');
+        return;
+      }
+
+      const entranceDistanceBefore = haversineDistance(userCoords, targetCoords);
+      const entranceDistanceAfter = haversineDistance(entranceCoords, targetCoords);
+      if (entranceDistanceAfter >= entranceDistanceBefore) {
+        showError('Routing to entrance moves away from destination.');
         return;
       }
 
@@ -800,71 +736,144 @@ async function startNavigationToProperty(property) {
       steps.push(...toEntrance.steps);
       totalDistance += toEntrance.distance;
 
-      await navigateUsingInternalPaths(property, entrance);
-    }
+      // 🚫 Avoid middle point logic if destination is very west or very near
+      const minFirstLng = Math.min(...firstLayerPoints.map(p => p.lng));
+      const minSecondLng = Math.min(...secondLayerPoints.map(p => p.lng));
+      const isMoreWestThanAll = property.lng < minFirstLng && property.lng < minSecondLng;
+      const shouldSkipMiddlePoints = isNear || isMoreWestThanAll;
 
-    // 🧠 If outside and FAR — go entrance ➝ best middle ➝ target
-    else {
-      const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
-      if (!toEntrance?.coordinates?.length) {
-        showError('Failed to get route to entrance.');
-        return;
-      }
+      if (shouldSkipMiddlePoints) {
+        console.warn('Skipping middle points: target is either near or west of middle layers.');
+        await navigateUsingInternalPaths(property, entrance);
+      } else {
+        let bestFirst = null;
+        let bestSecond = null;
 
-      coords.push(...toEntrance.coordinates);
-      steps.push(...toEntrance.steps);
-      totalDistance += toEntrance.distance;
+        const eastOfAll = property.lng > 120.9762;
+        const westOfDecisionPoint = property.lng < 120.9761;
 
-      const { bestFirst, bestSecond } = await getBestMiddleRoute();
+        ({ bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords));
+        if (westOfDecisionPoint) bestSecond = null;
 
-      if (bestFirst && bestSecond) {
-        const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
-        const toSecond = await getMapboxDirections([bestFirst.lng, bestFirst.lat], [bestSecond.lng, bestSecond.lat]);
-
-        if (!toFirst?.coordinates?.length || !toSecond?.coordinates?.length) {
-          showError('Failed at middle point routing.');
-          return;
+        if (bestFirst) {
+          const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
+          if (toFirst?.coordinates?.length) {
+            coords.push(...toFirst.coordinates);
+            steps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
+            totalDistance += toFirst.distance;
+          }
         }
 
-        coords.push(...toFirst.coordinates, ...toSecond.coordinates);
-        steps.push(
-          { instruction: 'Enter cemetery grounds', distance: 0 },
-          ...toFirst.steps,
-          ...toSecond.steps
-        );
-        totalDistance += toFirst.distance + toSecond.distance;
+        if (bestFirst && bestSecond) {
+          const toSecond = await getMapboxDirections(
+            [bestFirst.lng, bestFirst.lat],
+            [bestSecond.lng, bestSecond.lat]
+          );
+          if (toSecond?.coordinates?.length) {
+            coords.push(...toSecond.coordinates);
+            steps.push(...toSecond.steps);
+            totalDistance += toSecond.distance;
+          }
+        }
 
-        await navigateUsingInternalPaths(property, bestSecond);
-      } else {
-        await navigateUsingInternalPaths(property, entrance);
+        const finalFrom = bestSecond || bestFirst || entrance;
+        await navigateUsingInternalPaths(property, finalFrom);
       }
     }
 
-    // 🚧 Final route creation
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
+      stopNavigation();
       return;
     }
 
+    const internalCoords = selectedLineString.coordinates;
+    const internalDistance = calculatePathDistance(internalCoords);
+
     currentRoute = {
-      coordinates: [...coords, ...selectedLineString.coordinates],
-      distance: totalDistance + calculatePathDistance(selectedLineString.coordinates),
-      steps: [...steps, ...createInternalSteps(selectedLineString.coordinates)]
+      coordinates: [...coords, ...internalCoords],
+      distance: totalDistance + internalDistance,
+      steps: [...steps, ...createInternalSteps(internalCoords)],
     };
 
     displayRoute();
     startNavigationUpdates();
-
   } catch (err) {
     console.error('Navigation error:', err);
-    showError('Failed to create route: ' + err.message);
+    showError('Failed to create route: ' + (err.message || err));
     stopNavigation();
   } finally {
     isLoading = false;
   }
 }
+ 
 
-  // Route path directions functionality preserved from original
+
+function haversineDistance(coord1, coord2) {
+  const toRad = deg => deg * Math.PI / 180;
+  const [lng1, lat1] = coord1;
+  const [lng2, lat2] = coord2;
+
+  const R = 6371e3; // meters
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+
+  const a = Math.sin(dLat / 2) ** 2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+            Math.sin(dLng / 2) ** 2;
+
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+const firstLayerPoints = [
+  { lat: 14.4727, lng: 120.9767 },
+  { lat: 14.4727, lng: 120.9766 },
+  { lat: 14.4727, lng: 120.9765 },
+  { lat: 14.4727, lng: 120.9764 },
+  { lat: 14.4727, lng: 120.9763 },
+  { lat: 14.4727, lng: 120.9762 }
+];
+
+const secondLayerPoints = [
+  { lat: 14.4725, lng: 120.9766 },
+  { lat: 14.4725, lng: 120.9766 },
+  { lat: 14.4725, lng: 120.9764 },
+  { lat: 14.4725, lng: 120.9764 },
+  { lat: 14.4725, lng: 120.9763 },
+  { lat: 14.4725, lng: 120.9762 }
+];
+
+async function getBestMiddleRoute(property, entranceCoords, targetCoords) {
+  let bestFirst = null;
+  let bestSecond = null;
+  let minFirstDist = Infinity;
+  let minSecondDist = Infinity;
+
+  for (const pt of firstLayerPoints) {
+    const dist = haversineDistance(entranceCoords, [pt.lng, pt.lat]);
+    const towardTarget = pt.lng > entranceCoords[0]; // lng increasing = going east
+
+    if (towardTarget && dist < minFirstDist) {
+      bestFirst = pt;
+      minFirstDist = dist;
+    }
+  }
+
+  for (const pt of secondLayerPoints) {
+    const dist = haversineDistance(bestFirst ? [bestFirst.lng, bestFirst.lat] : entranceCoords, [pt.lng, pt.lat]);
+    const towardTarget = pt.lng > (bestFirst ? bestFirst.lng : entranceCoords[0]);
+
+    if (towardTarget && dist < minSecondDist) {
+      bestSecond = pt;
+      minSecondDist = dist;
+    }
+  }
+
+  return { bestFirst, bestSecond };
+}
+
+
+// Route path directions functionality preserved from original
   function getCemeteryBoundary() {
     return [
       [120.975, 14.470],
