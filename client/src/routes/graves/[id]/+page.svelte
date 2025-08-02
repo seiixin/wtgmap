@@ -709,8 +709,8 @@ async function startNavigationToProperty(property) {
     const entrance = findNearestEntrance();
     const entranceCoords = [entrance.lng, entrance.lat];
 
-    const referencePoint = { lat: 14.4722, lng: 120.9759 }; // Point F
-    const isSouthOrWest = property.lat < referencePoint.lat || property.lng < referencePoint.lng;
+    const referencePoint = { lat: 14.4725, lng: 120.9762 }; // Updated Point F
+    const isSouthAndWest = property.lat < referencePoint.lat && property.lng < referencePoint.lng;
 
     const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
     const isNearTarget = haversineDistance(userCoords, targetCoords) < 50;
@@ -719,7 +719,7 @@ async function startNavigationToProperty(property) {
     let navigationSteps = [];
     let totalDistance = 0;
 
-        // 🔵 Add destination marker
+    // Set destination marker
     if (!destinationMarker) {
       destinationMarker = new mapboxgl.Marker({ color: '#1d4ed8', scale: 1.2 })
         .setLngLat(targetCoords)
@@ -732,34 +732,26 @@ async function startNavigationToProperty(property) {
       await navigateUsingInternalPaths(property);
     } else {
       const routeToEntrance = await getMapboxDirections(userCoords, entranceCoords);
-
       if (!routeToEntrance?.coordinates?.length) {
         showError('Failed to get route to entrance.');
         return;
       }
 
-      const distToTargetDirect = haversineDistance(userCoords, targetCoords);
+      const distToTarget = haversineDistance(userCoords, targetCoords);
       const distAfterEntrance = haversineDistance(entranceCoords, targetCoords);
 
-      if (distAfterEntrance >= distToTargetDirect) {
+      if (distAfterEntrance >= distToTarget) {
         showError('Routing to entrance moves away from destination.');
         return;
       }
 
-      // Route from user to entrance
       routeCoords.push(...routeToEntrance.coordinates);
       navigationSteps.push(...routeToEntrance.steps);
       totalDistance += routeToEntrance.distance;
 
-      const isFarFromEntrance = distAfterEntrance > 120;
-
-      // Shortcut: If near or not on south/west side, skip middle points
-      if (!isFarFromEntrance || isNearTarget || !isSouthOrWest) {
-        console.warn('Skipping middle points.');
-        await navigateUsingInternalPaths(property, entrance);
-      } else {
-        // Use middle points
-        const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords);
+      // ✅ Use middle route if property is south and west of F
+      if (isSouthAndWest && !isNearTarget) {
+        const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords);
         let currentPoint = entrance;
 
         if (bestFirst) {
@@ -783,10 +775,13 @@ async function startNavigationToProperty(property) {
         }
 
         await navigateUsingInternalPaths(property, currentPoint);
+
+      } else {
+        console.warn('Skipping middle points.');
+        await navigateUsingInternalPaths(property, entrance);
       }
     }
 
-    // Final check and route construction
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
       stopNavigation();
@@ -813,10 +808,6 @@ async function startNavigationToProperty(property) {
     isLoading = false;
   }
 }
-
-
-
-
 
 function haversineDistance(coord1, coord2) {
   const toRad = deg => deg * Math.PI / 180;
@@ -852,29 +843,33 @@ const secondLayerPoints = [
   { lat: 14.4725, lng: 120.9762 }
 ];
 
-async function getBestMiddleRoute(property, entranceCoords, targetCoords) {
+async function getBestMiddleRoute(property, entranceCoords) {
   let bestFirst = null;
   let bestSecond = null;
   let minFirstDist = Infinity;
   let minSecondDist = Infinity;
 
+  // Pick first-layer point closest to entrance but also closer to target
   for (const pt of firstLayerPoints) {
-    const dist = haversineDistance(entranceCoords, [pt.lng, pt.lat]);
-    const towardTarget = pt.lng > entranceCoords[0]; // lng increasing = going east
+    const distFromEntrance = haversineDistance(entranceCoords, [pt.lng, pt.lat]);
+    const distToTarget = haversineDistance([pt.lng, pt.lat], [property.lng, property.lat]);
 
-    if (towardTarget && dist < minFirstDist) {
+    const score = distFromEntrance + distToTarget;
+    if (score < minFirstDist) {
       bestFirst = pt;
-      minFirstDist = dist;
+      minFirstDist = score;
     }
   }
 
+  // Pick second-layer point closest to property and next to bestFirst
   for (const pt of secondLayerPoints) {
-    const dist = haversineDistance(bestFirst ? [bestFirst.lng, bestFirst.lat] : entranceCoords, [pt.lng, pt.lat]);
-    const towardTarget = pt.lng > (bestFirst ? bestFirst.lng : entranceCoords[0]);
+    const distFromFirst = bestFirst ? haversineDistance([bestFirst.lng, bestFirst.lat], [pt.lng, pt.lat]) : 0;
+    const distToTarget = haversineDistance([pt.lng, pt.lat], [property.lng, property.lat]);
 
-    if (towardTarget && dist < minSecondDist) {
+    const score = distFromFirst + distToTarget;
+    if (score < minSecondDist) {
       bestSecond = pt;
-      minSecondDist = dist;
+      minSecondDist = score;
     }
   }
 
