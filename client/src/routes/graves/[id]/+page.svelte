@@ -710,9 +710,23 @@ async function startNavigationToProperty(property) {
     const entrance = findNearestEntrance();
     const entranceCoords = [entrance.lng, entrance.lat];
 
-    // Always use C as the middle point
-    const firstLayerPoint = { name: "C", lat: 14.4725, lng: 120.9764 };
-    const secondLayerPoint = { name: "C", lat: 14.4720, lng: 120.9760 };
+    const firstLayerPoints = [
+      { name: "A", lat: 14.4725, lng: 120.9766 },
+      { name: "B", lat: 14.4725, lng: 120.9766 },
+      { name: "C", lat: 14.4725, lng: 120.9764 },
+      { name: "D", lat: 14.4725, lng: 120.9764 },
+      { name: "E", lat: 14.4725, lng: 120.9763 },
+      { name: "F", lat: 14.4725, lng: 120.9762 }
+    ];
+
+    const secondLayerPoints = [
+      { name: "A", lat: 14.4719, lng: 120.9761 },
+      { name: "B", lat: 14.4720, lng: 120.9761 },
+      { name: "C", lat: 14.4720, lng: 120.9760 },
+      { name: "D", lat: 14.4721, lng: 120.9759 },
+      { name: "E", lat: 14.4721, lng: 120.9759 },
+      { name: "F", lat: 14.4721, lng: 120.9759 }
+    ];
 
     const haversineDistance = (coord1, coord2) => {
       const toRad = deg => deg * Math.PI / 180;
@@ -729,12 +743,40 @@ async function startNavigationToProperty(property) {
 
     const isNear = haversineDistance(entranceCoords, targetCoords) < 50; // 🎯 NEAR = under 50 meters
 
-    // Simplified - always use C as middle points
-    const getMiddleRoute = () => {
-      return {
-        bestFirst: firstLayerPoint,
-        bestSecond: secondLayerPoint
-      };
+    const getBestMiddleRoute = async () => {
+      if (property.lng >= 120.9760 && property.lng <= 120.9761) {
+        return {
+          bestFirst: firstLayerPoints.find(p => p.name === "C"),
+          bestSecond: secondLayerPoints.find(p => p.name === "C")
+        };
+      }
+
+      let bestIndex = -1;
+      let bestDistance = Infinity;
+
+      for (let i = 0; i < firstLayerPoints.length; i++) {
+        const first = firstLayerPoints[i];
+        const second = secondLayerPoints[i];
+
+        const toFirst = await getMapboxDirections(entranceCoords, [first.lng, first.lat]);
+        const toSecond = await getMapboxDirections([first.lng, first.lat], [second.lng, second.lat]);
+        const toTarget = await getMapboxDirections([second.lng, second.lat], targetCoords);
+
+        if (!toFirst || !toSecond || !toTarget) continue;
+
+        const total = toFirst.distance + toSecond.distance + toTarget.distance;
+        if (total < bestDistance) {
+          bestDistance = total;
+          bestIndex = i;
+        }
+      }
+
+      return bestIndex >= 0
+        ? {
+            bestFirst: firstLayerPoints[bestIndex],
+            bestSecond: secondLayerPoints[bestIndex]
+          }
+        : { bestFirst: null, bestSecond: null };
     };
 
     let coords = [];
@@ -746,7 +788,7 @@ async function startNavigationToProperty(property) {
       await navigateUsingInternalPaths(property);
     }
 
-    // 🏁 If outside but NEAR — go entrance ➝ property directly (NO MIDDLE POINTS)
+    // 🏁 If outside but NEAR — go entrance ➝ property directly
     else if (isNear) {
       const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
       if (!toEntrance?.coordinates?.length) {
@@ -758,7 +800,6 @@ async function startNavigationToProperty(property) {
       steps.push(...toEntrance.steps);
       totalDistance += toEntrance.distance;
 
-      // Go directly from entrance to property, skip middle points
       await navigateUsingInternalPaths(property, entrance);
     }
 
@@ -774,17 +815,17 @@ async function startNavigationToProperty(property) {
       steps.push(...toEntrance.steps);
       totalDistance += toEntrance.distance;
 
-      const { bestFirst, bestSecond } = getMiddleRoute();
+      const { bestFirst, bestSecond } = await getBestMiddleRoute();
 
-      // bestFirst and bestSecond will always be valid now (defaults to C)
-      const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
-      const toSecond = await getMapboxDirections([bestFirst.lng, bestFirst.lat], [bestSecond.lng, bestSecond.lat]);
+      if (bestFirst && bestSecond) {
+        const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
+        const toSecond = await getMapboxDirections([bestFirst.lng, bestFirst.lat], [bestSecond.lng, bestSecond.lat]);
 
-      if (!toFirst?.coordinates?.length || !toSecond?.coordinates?.length) {
-        // If middle route fails, fall back to direct route
-        console.warn('Middle route failed, using direct route');
-        await navigateUsingInternalPaths(property, entrance);
-      } else {
+        if (!toFirst?.coordinates?.length || !toSecond?.coordinates?.length) {
+          showError('Failed at middle point routing.');
+          return;
+        }
+
         coords.push(...toFirst.coordinates, ...toSecond.coordinates);
         steps.push(
           { instruction: 'Enter cemetery grounds', distance: 0 },
@@ -794,6 +835,8 @@ async function startNavigationToProperty(property) {
         totalDistance += toFirst.distance + toSecond.distance;
 
         await navigateUsingInternalPaths(property, bestSecond);
+      } else {
+        await navigateUsingInternalPaths(property, entrance);
       }
     }
 
@@ -820,6 +863,7 @@ async function startNavigationToProperty(property) {
     isLoading = false;
   }
 }
+
   // Route path directions functionality preserved from original
   function getCemeteryBoundary() {
     return [
