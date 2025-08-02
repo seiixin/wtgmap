@@ -716,17 +716,14 @@ async function startNavigationToProperty(property) {
     let steps = [];
     let totalDistance = 0;
 
-    // --- South or East Check ---
-    const allMiddlePoints = [...firstLayerPoints, ...secondLayerPoints];
-    const maxMiddleLng = Math.max(...allMiddlePoints.map(p => p.lng));
-    const minMiddleLat = Math.min(...allMiddlePoints.map(p => p.lat));
-    const isSouthOrEast = property.lat < minMiddleLat || property.lng > maxMiddleLng;
+    // --- South or West Check against second layer points only ---
+    const isSouthOfAny = secondLayerPoints.some(p => property.lat < p.lat);
+    const isWestOfAny = secondLayerPoints.some(p => property.lng < p.lng);
+    const shouldUseMiddleRoute = isSouthOfAny || isWestOfAny;
 
-    // --- If inside, go internal directly ---
     if (isInside) {
       await navigateUsingInternalPaths(property);
     } else {
-      // Step 1: Route to entrance
       const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
       if (!toEntrance?.coordinates?.length) {
         showError('Failed to get route to entrance.');
@@ -744,19 +741,16 @@ async function startNavigationToProperty(property) {
       steps.push(...toEntrance.steps);
       totalDistance += toEntrance.distance;
 
-      // Step 2: Middle route logic
       const farThreshold = 120; // meters
       const isFar = entranceAfterDist > farThreshold;
 
-      if (!isFar || isNear || !isSouthOrEast) {
-        console.warn('Skipping middle points: not far, near, or not south/east enough.');
+      if (!isFar || isNear || !shouldUseMiddleRoute) {
+        console.warn('Skipping middle points: not far, near, or not south/west of 2nd layer.');
         await navigateUsingInternalPaths(property, entrance);
       } else {
         const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords, targetCoords);
-
         let from = entrance;
 
-        // Step 2a: To first layer point
         if (bestFirst) {
           const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
           if (toFirst?.coordinates?.length) {
@@ -767,12 +761,8 @@ async function startNavigationToProperty(property) {
           }
         }
 
-        // Step 2b: To second layer point
         if (bestSecond) {
-          const toSecond = await getMapboxDirections(
-            [from.lng, from.lat],
-            [bestSecond.lng, bestSecond.lat]
-          );
+          const toSecond = await getMapboxDirections([from.lng, from.lat], [bestSecond.lng, bestSecond.lat]);
           if (toSecond?.coordinates?.length) {
             coords.push(...toSecond.coordinates);
             steps.push(...toSecond.steps);
@@ -785,7 +775,6 @@ async function startNavigationToProperty(property) {
       }
     }
 
-    // Step 3: Append internal route
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
       stopNavigation();
@@ -812,6 +801,7 @@ async function startNavigationToProperty(property) {
     isLoading = false;
   }
 }
+
 
 
 
@@ -904,9 +894,10 @@ async function getBestMiddleRoute(property, entranceCoords, targetCoords) {
     return inside;
   }
 
+ 
   function findNearestEntrance() {
     return { 
-      lng: 120.9768, 
+      lng: 120.9767, 
       lat: 14.4727, 
       name: "Main Entrance" 
     };
