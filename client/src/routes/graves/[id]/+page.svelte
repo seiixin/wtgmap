@@ -5,6 +5,7 @@
   import { goto } from '$app/navigation';
 
   // Svelte 5 runes
+  const entrance = findNearestEntrance(); // Point X
   let showConfirm = false;
   let showSearchDropdown = $state(false);
   let matchName = $state('');
@@ -94,7 +95,7 @@ onMount(async () => {
 
 
 
-  waitForRoutingData();
+  await waitForRoutingData();
 
     
 
@@ -693,64 +694,120 @@ function handleSearchButtonClick(name) {
   navigateToProperty(property);
 }
 async function startNavigationToProperty(property) {
-  const targetProperty = property;
-
-  if (!targetProperty || !userLocation) {
+  if (!property || !userLocation) {
     showError('Please enable location tracking and select a property.');
     return;
   }
 
   stopNavigation();
-
   isLoading = true;
   isNavigating = true;
 
   try {
+    const targetCoords = [property.lng, property.lat];
     const userCoords = [userLocation.lng, userLocation.lat];
-    const cemeteryBoundary = getCemeteryBoundary();
-    isInsideCemetery = pointInPolygon(userCoords, cemeteryBoundary);
+    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const entrance = findNearestEntrance();
+    const entranceCoords = [entrance.lng, entrance.lat];
 
-    if (isInsideCemetery) {
-      // 🛤 Internal navigation only
-      await navigateUsingInternalPaths(targetProperty);
+    // Always use C as the middle point
+    const firstLayerPoint = { name: "C", lat: 14.4725, lng: 120.9764 };
+    const secondLayerPoint = { name: "C", lat: 14.4720, lng: 120.9760 };
 
-      if (!selectedLineString?.coordinates?.length) {
-        showError('No internal route found.');
-        return;
-      }
+    const haversineDistance = (coord1, coord2) => {
+      const toRad = deg => deg * Math.PI / 180;
+      const [lon1, lat1] = coord1;
+      const [lon2, lat2] = coord2;
+      const R = 6371e3;
+      const dLat = toRad(lat2 - lat1);
+      const dLng = toRad(lon2 - lon1);
+      const a = Math.sin(dLat / 2) ** 2 +
+                Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+                Math.sin(dLng / 2) ** 2;
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    };
 
-      currentRoute = {
-        coordinates: selectedLineString.coordinates,
-        distance: calculatePathDistance(selectedLineString.coordinates),
-        steps: createInternalSteps(selectedLineString.coordinates)
+    const isNear = haversineDistance(entranceCoords, targetCoords) < 50; // 🎯 NEAR = under 50 meters
+
+    // Simplified - always use C as middle points
+    const getMiddleRoute = () => {
+      return {
+        bestFirst: firstLayerPoint,
+        bestSecond: secondLayerPoint
       };
-    } else {
-      // 🌐 External + internal navigation
-      const entrance = findNearestEntrance();
-      const externalRoute = await getMapboxDirections(userCoords, [entrance.lng, entrance.lat]);
+    };
 
-      if (!externalRoute?.coordinates?.length) {
-        showError('No external route found.');
-        return;
-      }
+    let coords = [];
+    let steps = [];
+    let totalDistance = 0;
 
-      await navigateUsingInternalPaths(targetProperty);
-
-      if (!selectedLineString?.coordinates?.length) {
-        showError('No internal route found.');
-        return;
-      }
-
-      currentRoute = {
-        coordinates: [...externalRoute.coordinates, ...selectedLineString.coordinates],
-        distance: externalRoute.distance + calculatePathDistance(selectedLineString.coordinates),
-        steps: [
-          ...externalRoute.steps,
-          { instruction: "Enter cemetery grounds", distance: 0 },
-          ...createInternalSteps(selectedLineString.coordinates)
-        ]
-      };
+    // 🌳 If inside cemetery
+    if (isInside) {
+      await navigateUsingInternalPaths(property);
     }
+
+    // 🏁 If outside but NEAR — go entrance ➝ property directly (NO MIDDLE POINTS)
+    else if (isNear) {
+      const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
+      if (!toEntrance?.coordinates?.length) {
+        showError('Failed to get route to entrance.');
+        return;
+      }
+
+      coords.push(...toEntrance.coordinates);
+      steps.push(...toEntrance.steps);
+      totalDistance += toEntrance.distance;
+
+      // Go directly from entrance to property, skip middle points
+      await navigateUsingInternalPaths(property, entrance);
+    }
+
+    // 🧠 If outside and FAR — go entrance ➝ best middle ➝ target
+    else {
+      const toEntrance = await getMapboxDirections(userCoords, entranceCoords);
+      if (!toEntrance?.coordinates?.length) {
+        showError('Failed to get route to entrance.');
+        return;
+      }
+
+      coords.push(...toEntrance.coordinates);
+      steps.push(...toEntrance.steps);
+      totalDistance += toEntrance.distance;
+
+      const { bestFirst, bestSecond } = getMiddleRoute();
+
+      // bestFirst and bestSecond will always be valid now (defaults to C)
+      const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
+      const toSecond = await getMapboxDirections([bestFirst.lng, bestFirst.lat], [bestSecond.lng, bestSecond.lat]);
+
+      if (!toFirst?.coordinates?.length || !toSecond?.coordinates?.length) {
+        // If middle route fails, fall back to direct route
+        console.warn('Middle route failed, using direct route');
+        await navigateUsingInternalPaths(property, entrance);
+      } else {
+        coords.push(...toFirst.coordinates, ...toSecond.coordinates);
+        steps.push(
+          { instruction: 'Enter cemetery grounds', distance: 0 },
+          ...toFirst.steps,
+          ...toSecond.steps
+        );
+        totalDistance += toFirst.distance + toSecond.distance;
+
+        await navigateUsingInternalPaths(property, bestSecond);
+      }
+    }
+
+    // 🚧 Final route creation
+    if (!selectedLineString?.coordinates?.length) {
+      showError('No internal route found.');
+      return;
+    }
+
+    currentRoute = {
+      coordinates: [...coords, ...selectedLineString.coordinates],
+      distance: totalDistance + calculatePathDistance(selectedLineString.coordinates),
+      steps: [...steps, ...createInternalSteps(selectedLineString.coordinates)]
+    };
 
     displayRoute();
     startNavigationUpdates();
@@ -835,6 +892,11 @@ async function startNavigationToProperty(property) {
       ...closestPath,
       coordinates: truncatedCoordinates
     };
+    if (!selectedLineString?.coordinates?.length) {
+    showError('No internal route found.');
+    return;
+  }
+
   }
 
   function showOnlySelectedPath(selectedPath) {
