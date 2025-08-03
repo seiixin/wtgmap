@@ -828,8 +828,6 @@ function haversineDistance(coord1, coord2) {
 const firstLayerPoints = [
   { id: 'A', lat: 14.4727, lng: 120.9767 },
   { id: 'B', lat: 14.4727, lng: 120.9766 },
-  { id: 'C', lat: 14.4727, lng: 120.9765 },
-  { id: 'D', lat: 14.4727, lng: 120.9764 },
   { id: 'E', lat: 14.4727, lng: 120.9763 },
   { id: 'F', lat: 14.4727, lng: 120.9762 }
 ];
@@ -837,8 +835,6 @@ const firstLayerPoints = [
 const secondLayerPoints = [
   { id: 'A', lat: 14.4725, lng: 120.9766 },
   { id: 'B', lat: 14.4725, lng: 120.9766 },
-  { id: 'C', lat: 14.4725, lng: 120.9764 },
-  { id: 'D', lat: 14.4725, lng: 120.9764 },
   { id: 'E', lat: 14.4725, lng: 120.9763 },
   { id: 'F', lat: 14.4725, lng: 120.9762 }
 ];
@@ -846,35 +842,44 @@ const secondLayerPoints = [
 async function getBestMiddleRoute(property, entranceCoords) {
   let bestFirst = null;
   let bestSecond = null;
-  let minFirstDist = Infinity;
-  let minSecondDist = Infinity;
+  let minSecondScore = Infinity;
 
-  // Pick first-layer point closest to entrance but also closer to target
-  for (const pt of firstLayerPoints) {
+  // 1. Pick best second-layer point (closest to entrance + toward property)
+  for (const pt of secondLayerPoints) {
     const distFromEntrance = haversineDistance(entranceCoords, [pt.lng, pt.lat]);
     const distToTarget = haversineDistance([pt.lng, pt.lat], [property.lng, property.lat]);
-
     const score = distFromEntrance + distToTarget;
-    if (score < minFirstDist) {
-      bestFirst = pt;
-      minFirstDist = score;
+
+    if (score < minSecondScore) {
+      bestSecond = pt;
+      minSecondScore = score;
     }
   }
 
-  // Pick second-layer point closest to property and next to bestFirst
-  for (const pt of secondLayerPoints) {
-    const distFromFirst = bestFirst ? haversineDistance([bestFirst.lng, bestFirst.lat], [pt.lng, pt.lat]) : 0;
-    const distToTarget = haversineDistance([pt.lng, pt.lat], [property.lng, property.lat]);
+  if (!bestSecond) {
+    console.warn("No second-layer point selected.");
+    return { bestFirst: null, bestSecond: null };
+  }
 
-    const score = distFromFirst + distToTarget;
-    if (score < minSecondDist) {
-      bestSecond = pt;
-      minSecondDist = score;
+  // 2. Match first-layer point by ID
+  const matchingFirst = firstLayerPoints.find(pt => pt.id === bestSecond.id);
+
+  if (matchingFirst) {
+    bestFirst = matchingFirst;
+  } else {
+    // Fallback: choose first-layer point closest to bestSecond
+    let minFirstDist = Infinity;
+    for (const pt of firstLayerPoints) {
+      const dist = haversineDistance([pt.lng, pt.lat], [bestSecond.lng, bestSecond.lat]);
+      if (dist < minFirstDist) {
+        bestFirst = pt;
+        minFirstDist = dist;
+      }
     }
   }
 
   console.log("🏁 Final Selection:");
-  console.log("Second Layer (closest to property):", bestSecond);
+  console.log("Second Layer (picked first):", bestSecond);
   console.log("First Layer (matched):", bestFirst);
 
   return { bestFirst, bestSecond };
