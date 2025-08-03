@@ -826,21 +826,21 @@ function haversineDistance(coord1, coord2) {
 }
 
 const firstLayerPoints = [
-  { lat: 14.4727, lng: 120.9767 },
-  { lat: 14.4727, lng: 120.9766 },
-  { lat: 14.4727, lng: 120.9765 },
-  { lat: 14.4727, lng: 120.9764 },
-  { lat: 14.4727, lng: 120.9763 },
-  { lat: 14.4727, lng: 120.9762 }
+  { id: 'A', lat: 14.4727, lng: 120.9767 },
+  { id: 'B', lat: 14.4727, lng: 120.9766 },
+  { id: 'C', lat: 14.4727, lng: 120.9765 },
+  { id: 'D', lat: 14.4727, lng: 120.9764 },
+  { id: 'E', lat: 14.4727, lng: 120.9763 },
+  { id: 'F', lat: 14.4727, lng: 120.9762 }
 ];
 
 const secondLayerPoints = [
-  { lat: 14.4725, lng: 120.9766 },
-  { lat: 14.4725, lng: 120.9766 },
-  { lat: 14.4725, lng: 120.9764 },
-  { lat: 14.4725, lng: 120.9764 },
-  { lat: 14.4725, lng: 120.9763 },
-  { lat: 14.4725, lng: 120.9762 }
+  { id: 'A', lat: 14.4725, lng: 120.9766 },
+  { id: 'B', lat: 14.4725, lng: 120.9766 },
+  { id: 'C', lat: 14.4725, lng: 120.9764 },
+  { id: 'D', lat: 14.4725, lng: 120.9764 },
+  { id: 'E', lat: 14.4725, lng: 120.9763 },
+  { id: 'F', lat: 14.4725, lng: 120.9762 }
 ];
 
 async function getBestMiddleRoute(property, entranceCoords) {
@@ -872,6 +872,10 @@ async function getBestMiddleRoute(property, entranceCoords) {
       minSecondDist = score;
     }
   }
+
+  console.log("🏁 Final Selection:");
+  console.log("Second Layer (closest to property):", bestSecond);
+  console.log("First Layer (matched):", bestFirst);
 
   return { bestFirst, bestSecond };
 }
