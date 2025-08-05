@@ -285,12 +285,12 @@ map.once('idle', async () => {
   // 🔹 Add vector sources
   map.addSource('subdivision-blocks-source', {
     type: 'vector',
-    url: 'mapbox://intellitech.cmdmlm8n90bju1onvjg1lijbp-54whw'
+    url: 'mapbox://intellitech.cmdysziqy2z5w1ppbaq7avd4f-1cy1n'
   });
 
   map.addSource('locator-blocks-source', {
     type: 'vector',
-    url: 'mapbox://intellitech.cmdngha7ab8101mpcv9pk5vt2-831gg'
+    url: 'mapbox://intellitech.cmdyur3j11y1r1mmmgm3o6hm0-8icpb'
   });
 
   // 🔹 Add subdivision block layers
