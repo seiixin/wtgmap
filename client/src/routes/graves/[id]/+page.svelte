@@ -728,59 +728,94 @@ async function startNavigationToProperty(property) {
       destinationMarker.setLngLat(targetCoords);
     }
 
-    if (isInside) {
-      await navigateUsingInternalPaths(property);
-    } else {
-      const routeToEntrance = await getMapboxDirections(userCoords, entranceCoords);
-      if (!routeToEntrance?.coordinates?.length) {
-        showError('Failed to get route to entrance.');
-        return;
-      }
+if (isInside) {
+  await navigateUsingInternalPaths(property);
+} else {
+  const routeToEntrance = await getMapboxDirections(userCoords, entranceCoords);
+  if (!routeToEntrance?.coordinates?.length) {
+    showError('Failed to get route to entrance.');
+    return;
+  }
 
-      const distToTarget = haversineDistance(userCoords, targetCoords);
-      const distAfterEntrance = haversineDistance(entranceCoords, targetCoords);
+  const distToTarget = haversineDistance(userCoords, targetCoords);
+  const distAfterEntrance = haversineDistance(entranceCoords, targetCoords);
 
-      if (distAfterEntrance >= distToTarget) {
-        showError('Routing to entrance moves away from destination.');
-        return;
-      }
+  if (distAfterEntrance >= distToTarget) {
+    showError('Routing to entrance moves away from destination.');
+    return;
+  }
 
-      routeCoords.push(...routeToEntrance.coordinates);
-      navigationSteps.push(...routeToEntrance.steps);
-      totalDistance += routeToEntrance.distance;
+  routeCoords.push(...routeToEntrance.coordinates);
+  navigationSteps.push(...routeToEntrance.steps);
+  totalDistance += routeToEntrance.distance;
 
-      // ✅ Use middle route if property is south and west of F
-      if (isSouthAndWest && !isNearTarget) {
-        const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords);
-        let currentPoint = entrance;
+  // ✅ Skip middle points entirely if target is too deep southwest
+  const isTargetDeepSouthwest = targetCoords[1] < 14.4724 && targetCoords[0] < 120.9761;
 
-        if (bestFirst) {
-          const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
-          if (toFirst?.coordinates?.length) {
-            routeCoords.push(...toFirst.coordinates);
-            navigationSteps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
-            totalDistance += toFirst.distance;
-            currentPoint = bestFirst;
-          }
-        }
+  // ✅ Proceed with middle route logic only if valid
+  if (isSouthAndWest && !isNearTarget && !isTargetDeepSouthwest) {
+    const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords);
+    let currentPoint = entrance;
 
-        if (bestSecond) {
-          const toSecond = await getMapboxDirections([currentPoint.lng, currentPoint.lat], [bestSecond.lng, bestSecond.lat]);
-          if (toSecond?.coordinates?.length) {
-            routeCoords.push(...toSecond.coordinates);
-            navigationSteps.push(...toSecond.steps);
-            totalDistance += toSecond.distance;
-            currentPoint = bestSecond;
-          }
-        }
+    let shouldSkipMiddle = false;
 
-        await navigateUsingInternalPaths(property, currentPoint);
+    if (bestFirst) {
+      const distFirstToTarget = haversineDistance([bestFirst.lng, bestFirst.lat], targetCoords);
+      const entranceToTarget = haversineDistance(entranceCoords, targetCoords);
 
-      } else {
-        console.warn('Skipping middle points.');
-        await navigateUsingInternalPaths(property, entrance);
+      const isBacktracking =
+        bestFirst.lat > entranceCoords.lat || // Going north (bad)
+        bestFirst.lng > entranceCoords.lng;  // Going east (bad)
+
+      if (distFirstToTarget >= entranceToTarget || isBacktracking) {
+        shouldSkipMiddle = true;
       }
     }
+
+    if (!shouldSkipMiddle && bestSecond) {
+      const distSecondToTarget = haversineDistance([bestSecond.lng, bestSecond.lat], targetCoords);
+
+      const isSecondBacktracking =
+        bestSecond.lat > currentPoint.lat ||  // Going north (bad)
+        bestSecond.lng > currentPoint.lng;    // Going east (bad)
+
+      if (distSecondToTarget >= distAfterEntrance || isSecondBacktracking) {
+        shouldSkipMiddle = true;
+      }
+    }
+
+    if (!shouldSkipMiddle) {
+      if (bestFirst) {
+        const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
+        if (toFirst?.coordinates?.length) {
+          routeCoords.push(...toFirst.coordinates);
+          navigationSteps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
+          totalDistance += toFirst.distance;
+          currentPoint = bestFirst;
+        }
+      }
+
+      if (bestSecond) {
+        const toSecond = await getMapboxDirections([currentPoint.lng, currentPoint.lat], [bestSecond.lng, bestSecond.lat]);
+        if (toSecond?.coordinates?.length) {
+          routeCoords.push(...toSecond.coordinates);
+          navigationSteps.push(...toSecond.steps);
+          totalDistance += toSecond.distance;
+          currentPoint = bestSecond;
+        }
+      }
+
+      await navigateUsingInternalPaths(property, currentPoint);
+    } else {
+      console.warn('Skipping middle points due to backtracking or inefficiency.');
+      await navigateUsingInternalPaths(property, entrance);
+    }
+  } else {
+    console.warn('Skipping middle points due to deep southwest target or not eligible.');
+    await navigateUsingInternalPaths(property, entrance);
+  }
+}
+
 
     if (!selectedLineString?.coordinates?.length) {
       showError('No internal route found.');
@@ -828,15 +863,11 @@ function haversineDistance(coord1, coord2) {
 const firstLayerPoints = [
   { id: 'A', lat: 14.4727, lng: 120.9767 },
   { id: 'B', lat: 14.4727, lng: 120.9766 },
-  { id: 'E', lat: 14.4727, lng: 120.9763 },
-  { id: 'F', lat: 14.4727, lng: 120.9762 }
 ];
 
 const secondLayerPoints = [
   { id: 'A', lat: 14.4725, lng: 120.9766 },
   { id: 'B', lat: 14.4725, lng: 120.9766 },
-  { id: 'E', lat: 14.4725, lng: 120.9763 },
-  { id: 'F', lat: 14.4725, lng: 120.9762 }
 ];
 
 async function getBestMiddleRoute(property, entranceCoords) {
