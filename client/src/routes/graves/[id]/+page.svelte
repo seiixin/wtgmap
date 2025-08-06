@@ -290,7 +290,7 @@ map.once('idle', async () => {
 
   map.addSource('locator-blocks-source', {
     type: 'vector',
-    url: 'mapbox://intellitech.cmdyulwwv1hj11mmvsexq213b-1rd5f'
+    url: 'mapbox://intellitech.cme0cp8bs0ato1plqyzz7xcp8-1904w'
   });
 
   // 🔹 Add subdivision block layers
