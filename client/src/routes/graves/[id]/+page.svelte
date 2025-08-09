@@ -703,16 +703,27 @@ async function startNavigationToProperty(property) {
   isLoading = true;
   isNavigating = true;
 
-  try {
-    const userCoords = [userLocation.lng, userLocation.lat];
-    const targetCoords = [property.lng, property.lat];
-    const entrance = findNearestEntrance();
-    const entranceCoords = [entrance.lng, entrance.lat];
+  // Helper: merge route segments to avoid "putol" gaps
+  function mergeRouteLegs(existing, incoming) {
+    if (!incoming?.length) return existing;
+    if (!existing.length) return [...incoming];
 
-    const referencePoint = { lat: 14.4725, lng: 120.9762 }; // Updated Point F
-    const isSouthAndWest = property.lat < referencePoint.lat && property.lng < referencePoint.lng;
+    const last = existing[existing.length - 1];
+    const firstNew = incoming[0];
+
+    // Ensure continuity by adding a connecting point if needed
+    if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) {
+      existing.push(firstNew);
+    }
+    return existing.concat(incoming.slice(1));
+  }
+
+  try {
+    const userCoords = [userLocation.lng, userLocation.lat]; // ✅ Always live location
+    const targetCoords = [property.lng, property.lat];
 
     const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const isTargetInside = pointInPolygon(targetCoords, getCemeteryBoundary());
     const isNearTarget = haversineDistance(userCoords, targetCoords) < 50;
 
     let routeCoords = [];
@@ -728,108 +739,79 @@ async function startNavigationToProperty(property) {
       destinationMarker.setLngLat(targetCoords);
     }
 
-if (isInside) {
-  await navigateUsingInternalPaths(property);
-} else {
-  const routeToEntrance = await getMapboxDirections(userCoords, entranceCoords);
-  if (!routeToEntrance?.coordinates?.length) {
-    showError('Failed to get route to entrance.');
-    return;
-  }
+    // ✅ Case 1: Both inside → purely internal
+    if (isInside && isTargetInside) {
+      await navigateUsingInternalPaths(property, { lng: userCoords[0], lat: userCoords[1] });
 
-  const distToTarget = haversineDistance(userCoords, targetCoords);
-  const distAfterEntrance = haversineDistance(entranceCoords, targetCoords);
+      if (!selectedLineString?.coordinates?.length) {
+        showError('No internal route found.');
+        stopNavigation();
+        return;
+      }
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
+    }
 
-  if (distAfterEntrance >= distToTarget) {
-    showError('Routing to entrance moves away from destination.');
-    return;
-  }
+    // ✅ Case 2: Inside → Outside
+    else if (isInside && !isTargetInside) {
+      const nearestExit = findNearestEntrance();
+      await navigateUsingInternalPaths(nearestExit, { lng: userCoords[0], lat: userCoords[1] });
 
-  routeCoords.push(...routeToEntrance.coordinates);
-  navigationSteps.push(...routeToEntrance.steps);
-  totalDistance += routeToEntrance.distance;
+      if (!selectedLineString?.coordinates?.length) {
+        showError('No internal route found to exit.');
+        stopNavigation();
+        return;
+      }
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
 
-  // ✅ Skip middle points entirely if target is too deep southwest
-  const isTargetDeepSouthwest = targetCoords[1] < 14.4724 && targetCoords[0] < 120.9761;
-
-  // ✅ Proceed with middle route logic only if valid
-  if (isSouthAndWest && !isNearTarget && !isTargetDeepSouthwest) {
-    const { bestFirst, bestSecond } = await getBestMiddleRoute(property, entranceCoords);
-    let currentPoint = entrance;
-
-    let shouldSkipMiddle = false;
-
-    if (bestFirst) {
-      const distFirstToTarget = haversineDistance([bestFirst.lng, bestFirst.lat], targetCoords);
-      const entranceToTarget = haversineDistance(entranceCoords, targetCoords);
-
-      const isBacktracking =
-        bestFirst.lat > entranceCoords.lat || // Going north (bad)
-        bestFirst.lng > entranceCoords.lng;  // Going east (bad)
-
-      if (distFirstToTarget >= entranceToTarget || isBacktracking) {
-        shouldSkipMiddle = true;
+      const exitCoords = [nearestExit.lng, nearestExit.lat];
+      const toOutside = await getMapboxDirections(exitCoords, targetCoords);
+      if (toOutside?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, toOutside.coordinates);
+        totalDistance += toOutside.distance;
+        navigationSteps.push(...toOutside.steps);
       }
     }
 
-    if (!shouldSkipMiddle && bestSecond) {
-      const distSecondToTarget = haversineDistance([bestSecond.lng, bestSecond.lat], targetCoords);
-
-      const isSecondBacktracking =
-        bestSecond.lat > currentPoint.lat ||  // Going north (bad)
-        bestSecond.lng > currentPoint.lng;    // Going east (bad)
-
-      if (distSecondToTarget >= distAfterEntrance || isSecondBacktracking) {
-        shouldSkipMiddle = true;
-      }
-    }
-
-    if (!shouldSkipMiddle) {
-      if (bestFirst) {
-        const toFirst = await getMapboxDirections(entranceCoords, [bestFirst.lng, bestFirst.lat]);
-        if (toFirst?.coordinates?.length) {
-          routeCoords.push(...toFirst.coordinates);
-          navigationSteps.push({ instruction: 'Enter cemetery grounds', distance: 0 }, ...toFirst.steps);
-          totalDistance += toFirst.distance;
-          currentPoint = bestFirst;
-        }
+    // ✅ Case 3: Outside → Inside
+    else if (!isInside && isTargetInside) {
+      const nearestEntrance = findNearestEntrance();
+      const toEntrance = await getMapboxDirections(userCoords, [nearestEntrance.lng, nearestEntrance.lat]);
+      if (toEntrance?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, toEntrance.coordinates);
+        totalDistance += toEntrance.distance;
+        navigationSteps.push(...toEntrance.steps);
       }
 
-      if (bestSecond) {
-        const toSecond = await getMapboxDirections([currentPoint.lng, currentPoint.lat], [bestSecond.lng, bestSecond.lat]);
-        if (toSecond?.coordinates?.length) {
-          routeCoords.push(...toSecond.coordinates);
-          navigationSteps.push(...toSecond.steps);
-          totalDistance += toSecond.distance;
-          currentPoint = bestSecond;
-        }
+      await navigateUsingInternalPaths(property, nearestEntrance);
+
+      if (!selectedLineString?.coordinates?.length) {
+        showError('No internal route found.');
+        stopNavigation();
+        return;
       }
-
-      await navigateUsingInternalPaths(property, currentPoint);
-    } else {
-      console.warn('Skipping middle points due to backtracking or inefficiency.');
-      await navigateUsingInternalPaths(property, entrance);
-    }
-  } else {
-    console.warn('Skipping middle points due to deep southwest target or not eligible.');
-    await navigateUsingInternalPaths(property, entrance);
-  }
-}
-
-
-    if (!selectedLineString?.coordinates?.length) {
-      showError('No internal route found.');
-      stopNavigation();
-      return;
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
     }
 
-    const internalCoords = selectedLineString.coordinates;
-    const internalDistance = calculatePathDistance(internalCoords);
+    // ✅ Case 4: Both outside → direct Mapbox
+    else {
+      const outsideRoute = await getMapboxDirections(userCoords, targetCoords);
+      if (outsideRoute?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, outsideRoute.coordinates);
+        totalDistance += outsideRoute.distance;
+        navigationSteps.push(...outsideRoute.steps);
+      }
+    }
 
     currentRoute = {
-      coordinates: [...routeCoords, ...internalCoords],
-      distance: totalDistance + internalDistance,
-      steps: [...navigationSteps, ...createInternalSteps(internalCoords)],
+      coordinates: routeCoords,
+      distance: totalDistance,
+      steps: navigationSteps
     };
 
     displayRoute();
@@ -915,7 +897,7 @@ async function getBestMiddleRoute(property, entranceCoords) {
 
   return { bestFirst, bestSecond };
 }
-
+ 
 
 // Route path directions functionality preserved from original
   function getCemeteryBoundary() {
