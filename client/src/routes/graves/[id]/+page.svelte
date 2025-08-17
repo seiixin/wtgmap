@@ -693,6 +693,8 @@ function handleSearchButtonClick(name) {
 
   navigateToProperty(property);
 }
+// Refactored navigation code (middle route logic removed)
+
 async function startNavigationToProperty(property) {
   if (!property || !userLocation) {
     showError('Please enable location tracking and select a property.');
@@ -703,15 +705,12 @@ async function startNavigationToProperty(property) {
   isLoading = true;
   isNavigating = true;
 
-  // Helper: merge route segments to avoid "putol" gaps
   function mergeRouteLegs(existing, incoming) {
     if (!incoming?.length) return existing;
     if (!existing.length) return [...incoming];
 
     const last = existing[existing.length - 1];
     const firstNew = incoming[0];
-
-    // Ensure continuity by adding a connecting point if needed
     if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) {
       existing.push(firstNew);
     }
@@ -719,30 +718,25 @@ async function startNavigationToProperty(property) {
   }
 
   try {
-    const userCoords = [userLocation.lng, userLocation.lat]; // ✅ Always live location
+    const userCoords = [userLocation.lng, userLocation.lat];
     const targetCoords = [property.lng, property.lat];
 
     const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
     const isTargetInside = pointInPolygon(targetCoords, getCemeteryBoundary());
-    const isNearTarget = haversineDistance(userCoords, targetCoords) < 50;
 
     let routeCoords = [];
     let navigationSteps = [];
     let totalDistance = 0;
 
-    // Set destination marker
     if (!destinationMarker) {
       destinationMarker = new mapboxgl.Marker({ color: '#1d4ed8', scale: 1.2 })
-        .setLngLat(targetCoords)
-        .addTo(map);
+        .setLngLat(targetCoords).addTo(map);
     } else {
       destinationMarker.setLngLat(targetCoords);
     }
 
-    // ✅ Case 1: Both inside → purely internal
     if (isInside && isTargetInside) {
       await navigateUsingInternalPaths(property, { lng: userCoords[0], lat: userCoords[1] });
-
       if (!selectedLineString?.coordinates?.length) {
         showError('No internal route found.');
         stopNavigation();
@@ -751,13 +745,9 @@ async function startNavigationToProperty(property) {
       routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
       totalDistance += calculatePathDistance(selectedLineString.coordinates);
       navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
-    }
-
-    // ✅ Case 2: Inside → Outside
-    else if (isInside && !isTargetInside) {
-      const nearestExit = findNearestEntrance();
-      await navigateUsingInternalPaths(nearestExit, { lng: userCoords[0], lat: userCoords[1] });
-
+    } else if (isInside && !isTargetInside) {
+      const exit = findNearestEntrance();
+      await navigateUsingInternalPaths(exit, { lng: userCoords[0], lat: userCoords[1] });
       if (!selectedLineString?.coordinates?.length) {
         showError('No internal route found to exit.');
         stopNavigation();
@@ -767,27 +757,22 @@ async function startNavigationToProperty(property) {
       totalDistance += calculatePathDistance(selectedLineString.coordinates);
       navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
 
-      const exitCoords = [nearestExit.lng, nearestExit.lat];
-      const toOutside = await getMapboxDirections(exitCoords, targetCoords);
-      if (toOutside?.coordinates?.length) {
-        routeCoords = mergeRouteLegs(routeCoords, toOutside.coordinates);
-        totalDistance += toOutside.distance;
-        navigationSteps.push(...toOutside.steps);
+      const exitCoords = [exit.lng, exit.lat];
+      const outside = await getMapboxDirections(exitCoords, targetCoords);
+      if (outside?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, outside.coordinates);
+        totalDistance += outside.distance;
+        navigationSteps.push(...outside.steps);
       }
-    }
-
-    // ✅ Case 3: Outside → Inside
-    else if (!isInside && isTargetInside) {
-      const nearestEntrance = findNearestEntrance();
-      const toEntrance = await getMapboxDirections(userCoords, [nearestEntrance.lng, nearestEntrance.lat]);
+    } else if (!isInside && isTargetInside) {
+      const entrance = findNearestEntrance();
+      const toEntrance = await getMapboxDirections(userCoords, [entrance.lng, entrance.lat]);
       if (toEntrance?.coordinates?.length) {
         routeCoords = mergeRouteLegs(routeCoords, toEntrance.coordinates);
         totalDistance += toEntrance.distance;
         navigationSteps.push(...toEntrance.steps);
       }
-
-      await navigateUsingInternalPaths(property, nearestEntrance);
-
+      await navigateUsingInternalPaths(property, entrance);
       if (!selectedLineString?.coordinates?.length) {
         showError('No internal route found.');
         stopNavigation();
@@ -796,10 +781,7 @@ async function startNavigationToProperty(property) {
       routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
       totalDistance += calculatePathDistance(selectedLineString.coordinates);
       navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
-    }
-
-    // ✅ Case 4: Both outside → direct Mapbox
-    else {
+    } else {
       const outsideRoute = await getMapboxDirections(userCoords, targetCoords);
       if (outsideRoute?.coordinates?.length) {
         routeCoords = mergeRouteLegs(routeCoords, outsideRoute.coordinates);
@@ -808,12 +790,7 @@ async function startNavigationToProperty(property) {
       }
     }
 
-    currentRoute = {
-      coordinates: routeCoords,
-      distance: totalDistance,
-      steps: navigationSteps
-    };
-
+    currentRoute = { coordinates: routeCoords, distance: totalDistance, steps: navigationSteps };
     displayRoute();
     startNavigationUpdates();
 
@@ -841,63 +818,6 @@ function haversineDistance(coord1, coord2) {
 
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
-
-const firstLayerPoints = [
-  { id: 'A', lat: 14.4727, lng: 120.9767 },
-  { id: 'B', lat: 14.4727, lng: 120.9766 },
-];
-
-const secondLayerPoints = [
-  { id: 'A', lat: 14.4725, lng: 120.9766 },
-  { id: 'B', lat: 14.4725, lng: 120.9766 },
-];
-
-async function getBestMiddleRoute(property, entranceCoords) {
-  let bestFirst = null;
-  let bestSecond = null;
-  let minSecondScore = Infinity;
-
-  // 1. Pick best second-layer point (closest to entrance + toward property)
-  for (const pt of secondLayerPoints) {
-    const distFromEntrance = haversineDistance(entranceCoords, [pt.lng, pt.lat]);
-    const distToTarget = haversineDistance([pt.lng, pt.lat], [property.lng, property.lat]);
-    const score = distFromEntrance + distToTarget;
-
-    if (score < minSecondScore) {
-      bestSecond = pt;
-      minSecondScore = score;
-    }
-  }
-
-  if (!bestSecond) {
-    console.warn("No second-layer point selected.");
-    return { bestFirst: null, bestSecond: null };
-  }
-
-  // 2. Match first-layer point by ID
-  const matchingFirst = firstLayerPoints.find(pt => pt.id === bestSecond.id);
-
-  if (matchingFirst) {
-    bestFirst = matchingFirst;
-  } else {
-    // Fallback: choose first-layer point closest to bestSecond
-    let minFirstDist = Infinity;
-    for (const pt of firstLayerPoints) {
-      const dist = haversineDistance([pt.lng, pt.lat], [bestSecond.lng, bestSecond.lat]);
-      if (dist < minFirstDist) {
-        bestFirst = pt;
-        minFirstDist = dist;
-      }
-    }
-  }
-
-  console.log("🏁 Final Selection:");
-  console.log("Second Layer (picked first):", bestSecond);
-  console.log("First Layer (matched):", bestFirst);
-
-  return { bestFirst, bestSecond };
-}
- 
 
 // Route path directions functionality preserved from original
   function getCemeteryBoundary() {
