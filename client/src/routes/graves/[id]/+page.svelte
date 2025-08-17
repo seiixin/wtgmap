@@ -607,22 +607,32 @@ lineFeatures.forEach(feature => {
 
 let destinationMarker = null;
 
-function forceRouteThroughGate(routeCoordinates, mainGateCoord) {
+function forceRouteThroughGate(routeCoordinates, mainGateCoord, userIsInside) {
+  // 🚫 Don't touch internal-only routes
+  if (userIsInside) {
+    return routeCoordinates;
+  }
+
   const startCoord = routeCoordinates[0];
-  const endCoord = routeCoordinates[routeCoordinates.length - 1];
+  const endCoord   = routeCoordinates[routeCoordinates.length - 1];
 
-  const distanceToGateFromStart = calculateDistance(startCoord, mainGateCoord);
-  const distanceToGateFromEnd = calculateDistance(endCoord, mainGateCoord);
+  // How far route starts from the gate
+  const startToGate = calculateDistance(startCoord, mainGateCoord);
+  // How far route ends from the gate
+  const endToGate   = calculateDistance(endCoord,   mainGateCoord);
 
-  // If route doesn't already start at the gate and gate is closer to start, prepend it
-  if (!isInside && distanceToGateFromStart < 20)  {
+  // Only prepend if the route starts NEAR the gate (within 30m)
+  // and the gate isn't already the start, and route ends farther away from it
+  if (
+    startToGate < 30 &&
+    startToGate < endToGate &&
+    !(startCoord[0] === mainGateCoord[0] && startCoord[1] === mainGateCoord[1])
+  ) {
     return [mainGateCoord, ...routeCoordinates];
   }
 
-  // If route ends at the gate (which may be the case), no need to add again
   return routeCoordinates;
 }
-
 
 function findNearestPointOnLine(targetPoint, lineCoordinates) {
   let nearestPoint = null;
