@@ -708,7 +708,6 @@ async function startNavigationToProperty(property) {
   function mergeRouteLegs(existing, incoming) {
     if (!incoming?.length) return existing;
     if (!existing.length) return [...incoming];
-
     const last = existing[existing.length - 1];
     const firstNew = incoming[0];
     if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) {
@@ -735,6 +734,7 @@ async function startNavigationToProperty(property) {
       destinationMarker.setLngLat(targetCoords);
     }
 
+    // CASE 1: Both inside => pure internal navigation
     if (isInside && isTargetInside) {
       await navigateUsingInternalPaths(property, { lng: userCoords[0], lat: userCoords[1] });
       if (!selectedLineString?.coordinates?.length) {
@@ -745,7 +745,18 @@ async function startNavigationToProperty(property) {
       routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
       totalDistance += calculatePathDistance(selectedLineString.coordinates);
       navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
-    } else if (isInside && !isTargetInside) {
+    }
+    // CASE 2: Outside => Outside => use Mapbox direct route (skip “force exit”)
+    else if (!isInside && !isTargetInside) {
+      const outsideRoute = await getMapboxDirections(userCoords, targetCoords);
+      if (outsideRoute?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, outsideRoute.coordinates);
+        totalDistance += outsideRoute.distance;
+        navigationSteps.push(...outsideRoute.steps);
+      }
+    }
+    // CASE 3: Inside => Outside => go to cemetery exit first
+    else if (isInside && !isTargetInside) {
       const exit = findNearestEntrance();
       await navigateUsingInternalPaths(exit, { lng: userCoords[0], lat: userCoords[1] });
       if (!selectedLineString?.coordinates?.length) {
@@ -764,7 +775,9 @@ async function startNavigationToProperty(property) {
         totalDistance += outside.distance;
         navigationSteps.push(...outside.steps);
       }
-    } else if (!isInside && isTargetInside) {
+    }
+    // CASE 4: Outside => Inside => go via entrance then internal path
+    else {
       const entrance = findNearestEntrance();
       const toEntrance = await getMapboxDirections(userCoords, [entrance.lng, entrance.lat]);
       if (toEntrance?.coordinates?.length) {
@@ -781,18 +794,11 @@ async function startNavigationToProperty(property) {
       routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
       totalDistance += calculatePathDistance(selectedLineString.coordinates);
       navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
-    } else {
-      const outsideRoute = await getMapboxDirections(userCoords, targetCoords);
-      if (outsideRoute?.coordinates?.length) {
-        routeCoords = mergeRouteLegs(routeCoords, outsideRoute.coordinates);
-        totalDistance += outsideRoute.distance;
-        navigationSteps.push(...outsideRoute.steps);
-      }
     }
 
     currentRoute = { coordinates: routeCoords, distance: totalDistance, steps: navigationSteps };
     displayRoute();
-    startNavigationUpdates();
+    startNavigationUpdates(); // ⚠ make sure this has distance-based arrival check
 
   } catch (error) {
     console.error('Navigation error:', error);
@@ -1395,22 +1401,7 @@ function findNearestRouteIndex(targetPoint, routeCoordinates) {
     distanceToDestination = 0;
   }
 
-  function navigateToExit() {
-    showExitPopup = false;
-    const entrance = findNearestEntrance();
-    
-    if (userLocation) {
-      // Start navigation to cemetery exit
-      startNavigationToProperty({
-        name: "Cemetery Exit",
-        lng: entrance.lng,
-        lat: entrance.lat
-      });
-      showSuccess("Navigating to cemetery exit");
-    } else {
-      showError("Location tracking required for exit navigation");
-    }
-  }
+  
 
   function showSuccess(message) {
     successMessage = message;
