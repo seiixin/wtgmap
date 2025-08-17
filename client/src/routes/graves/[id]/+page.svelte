@@ -1142,35 +1142,31 @@ function showConfirmation({ title, message, confirmText, cancelText, onConfirm, 
 }
 
 
-  async function getMapboxDirections(start, end) {
-    // Use walking profile to avoid "flying inside cemetery" and get more appropriate paths
-    const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
-    
-    const response = await fetch(url);
-    const data = await response.json();
-    
-    if (data.routes && data.routes.length > 0) {
-      return {
-        coordinates: data.routes[0].geometry.coordinates,
-        distance: data.routes[0].distance,
-        steps: data.routes[0].legs[0].steps.map(step => ({
-          instruction: step.maneuver.instruction,
-          distance: step.distance
-        }))
-      };
-    }
-    
-    throw new Error('No route found');
+// Always trusts the route returned by Mapbox (no more directional filtering)
+async function getMapboxDirections(start, end) {
+  const url =
+    `https://api.mapbox.com/directions/v5/mapbox/walking/` +
+    `${start[0]},${start[1]};${end[0]},${end[1]}` +
+    `?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
+
+  const response = await fetch(url);
+  const data     = await response.json();
+
+  if (data.routes && data.routes.length > 0) {
+    const route = data.routes[0];
+    return {
+      coordinates: route.geometry.coordinates,
+      distance:    route.distance,
+      steps:       route.legs[0].steps.map(step => ({
+        instruction: step.maneuver.instruction,
+        distance:    step.distance
+      }))
+    };
   }
 
-  function isHeadingEast(route) {
-  const coords = route.geometry.coordinates;
-  const [startLng] = coords[0];
-  const [endLng] = coords[coords.length - 1];
-
-  // If the longitude is increasing significantly, assume it's eastward
-  return (endLng - startLng) > 0.001;
+  throw new Error('No route found');
 }
+
 
 
 function findClosestPointOnRoute(userPoint, routeCoordinates) {
