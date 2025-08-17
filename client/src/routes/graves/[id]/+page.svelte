@@ -615,7 +615,7 @@ function forceRouteThroughGate(routeCoordinates, mainGateCoord) {
   const distanceToGateFromEnd = calculateDistance(endCoord, mainGateCoord);
 
   // If route doesn't already start at the gate and gate is closer to start, prepend it
-  if (distanceToGateFromStart > 10 && distanceToGateFromStart < distanceToGateFromEnd) {
+  if (!isInside && distanceToGateFromStart < 20)  {
     return [mainGateCoord, ...routeCoordinates];
   }
 
@@ -693,7 +693,6 @@ function handleSearchButtonClick(name) {
 
   navigateToProperty(property);
 }
-// Refactored navigation code (middle route logic removed)
 
 async function startNavigationToProperty(property) {
   if (!property || !userLocation) {
@@ -1166,8 +1165,6 @@ async function getMapboxDirections(start, end) {
 
   throw new Error('No route found');
 }
-
-
 
 function findClosestPointOnRoute(userPoint, routeCoordinates) {
   let closestPoint = null;
