@@ -1071,9 +1071,10 @@ function startNavigationUpdates() {
       currentStep = getCurrentStep(closestIndex);
 
       // Check if arrived
-      if (closestIndex >= currentRoute.coordinates.length - 2) {
-        completeNavigation();
-      }
+        if (distanceToDestination < 8) {
+          completeNavigation();
+        }
+
     }, 1000);
 }
 
