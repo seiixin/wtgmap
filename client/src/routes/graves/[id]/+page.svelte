@@ -54,10 +54,8 @@
   const DEST_SRC = 'destination-point';
   const DEST_LAYER = 'destination-point-symbol';
 
-  // Entrances (add more if you have them)
-  const ENTRANCES = [
-    { lng: 120.9767, lat: 14.4727, name: 'Main Entrance' },
-  ];
+  // Entrances
+  const ENTRANCES = [{ lng: 120.9767, lat: 14.4727, name: 'Main Entrance' }];
 
   const mapStyles = [
     { value: 'mapbox://styles/mapbox/streets-v12', label: 'Mapbox Streets' },
@@ -69,11 +67,15 @@
   ];
 
   // ================================
-  // Proximity settings (NEW)
+  // Proximity logic (adaptive + stall fallback)
   // ================================
-  const ARRIVAL_RADIUS_METERS = 8;   // hard arrival threshold
-  const NEAR_RADIUS_METERS    = 35;  // “malapit na” alert threshold
+  const BASE_ARRIVAL_M = 12;  // base hard-arrival (will expand with poor accuracy)
+  const BASE_NEAR_M    = 70;  // early "malapit na" alert
+  const STALL_WINDOW_S = 6;   // seconds window to consider "stalled"
+  const STALL_DELTA_M  = 2;   // improvement threshold within window
   let hasNearAlertFired = $state(false);
+  let proximityHistory = [];
+  let lastProximityCheckTs = 0;
 
   // ================================
   // Lifecycle
@@ -87,29 +89,21 @@
     }
 
     await initializeMap();
-
-    // Start tracking early so we can route from the user
     startTracking();
 
-    // After layers ready, load features and optionally auto-navigate
     await whenMapIdle();
     await loadLineStringFeatures();
     await loadLocatorBlockFeatures();
 
-    // zoom out so all locator tiles within cemetery are in view+loaded
     await zoomOutToLocatorBounds({ animate: false, padding: 60 });
-
-    // refresh locator blocks (full coverage)
     await loadLocatorBlockFeatures();
 
-    // camera
     if (userLocation) {
       map.easeTo({ center: [userLocation.lng, userLocation.lat], zoom: 19 });
     } else {
       map.easeTo({ zoom: 18 });
     }
 
-    // If URL had a block, pick it and auto-navigate once we have location
     if (selectedBlock) {
       const p = getFeatureByName(selectedBlock);
       if (p) {
@@ -120,14 +114,13 @@
             await startNavigationToProperty(p);
             toastSuccess(`Auto-navigating to ${p.name}`);
           } else {
-            pendingDestination = p; // queue it
+            pendingDestination = p;
             toastSuccess(`Selected ${p.name}. Waiting for your location...`);
           }
         }, 400);
       }
     }
 
-    // Optional: permission hint
     if (navigator.permissions?.query) {
       try {
         const { state } = await navigator.permissions.query({ name: 'geolocation' });
@@ -138,7 +131,6 @@
     }
   });
 
-  // Keep matchName synced with selectedProperty
   $effect(() => {
     if (selectedProperty?.name && selectedProperty.name !== matchName) {
       matchName = selectedProperty.name;
@@ -180,12 +172,12 @@
 
     map.on('load', () => {
       addCemeterySourcesAndLayers();
-      addUserAndDestinationLayers(); // << in-style pin symbols
+      addUserAndDestinationLayers();
       isMapLoaded = true;
 
       geolocate = new mapboxgl.GeolocateControl({
         positionOptions: { enableHighAccuracy: true },
-        trackUserLocation: false,   // we manage our own point source
+        trackUserLocation: false,
         showUserLocation: false
       });
       map.addControl(geolocate);
@@ -195,14 +187,12 @@
         setUserPin(lng, lat, accuracy);
       });
 
-      // If tracking was requested earlier, attach the GPS watch and trigger once
       if (isTracking) {
         attachGeoWatch();
         try { geolocate.trigger(); } catch {}
       }
     });
 
-    // Errors
     map.on('error', (e) => {
       console.error('Map error:', e?.error);
       toastError('Map error: ' + (e?.error?.message ?? 'Unknown'));
@@ -210,7 +200,6 @@
   }
 
   function addCemeterySourcesAndLayers() {
-    // Sources
     if (!map.getSource('subdivision-blocks-source')) {
       map.addSource('subdivision-blocks-source', {
         type: 'vector',
@@ -225,23 +214,17 @@
       });
     }
 
-    // Internal paths
     if (!map.getLayer('cemetery-paths')) {
       map.addLayer({
         id: 'cemetery-paths',
         type: 'line',
         source: 'subdivision-blocks-source',
         'source-layer': 'subdivision-blocks',
-        paint: {
-          'line-color': '#ffffff',
-          'line-width': 3,
-          'line-opacity': 1
-        },
+        paint: { 'line-color': '#ffffff', 'line-width': 3, 'line-opacity': 1 },
         filter: ['==', '$type', 'LineString']
       });
     }
 
-    // Locator dots + labels (tappable)
     if (!map.getLayer('locator-blocks')) {
       map.addLayer({
         id: 'locator-blocks',
@@ -289,7 +272,6 @@
       });
     }
 
-    // Click to navigate
     map.on('click', 'block-markers', (e) => {
       const f = e.features?.[0];
       const name = f?.properties?.name;
@@ -311,18 +293,11 @@
 
   // --- in-style user/destination point sources & SYMBOL layers (pin icons)
   function addUserAndDestinationLayers() {
-    // Create empty point sources
-    if (!map.getSource(USER_SRC)) {
-      map.addSource(USER_SRC, { type: 'geojson', data: emptyPoint() });
-    }
-    if (!map.getSource(DEST_SRC)) {
-      map.addSource(DEST_SRC, { type: 'geojson', data: emptyPoint() });
-    }
+    if (!map.getSource(USER_SRC)) map.addSource(USER_SRC, { type: 'geojson', data: emptyPoint() });
+    if (!map.getSource(DEST_SRC)) map.addSource(DEST_SRC, { type: 'geojson', data: emptyPoint() });
 
-    // Add pin images (once)
-    ensurePinImages(); // adds 'pin-user' and 'pin-dest'
+    ensurePinImages();
 
-    // User symbol layer
     if (!map.getLayer(USER_LAYER)) {
       map.addLayer({
         id: USER_LAYER,
@@ -337,7 +312,6 @@
       });
     }
 
-    // Destination symbol layer
     if (!map.getLayer(DEST_LAYER)) {
       map.addLayer({
         id: DEST_LAYER,
@@ -354,30 +328,22 @@
   }
 
   function ensurePinImages() {
-    if (!map.hasImage('pin-user')) {
-      map.addImage('pin-user', makePinImage('#ef4444'));   // red (user)
-    }
-    if (!map.hasImage('pin-dest')) {
-      map.addImage('pin-dest', makePinImage('#1d4ed8'));   // blue (destination)
-    }
+    if (!map.hasImage('pin-user')) map.addImage('pin-user', makePinImage('#ef4444'));
+    if (!map.hasImage('pin-dest')) map.addImage('pin-dest', makePinImage('#1d4ed8'));
   }
 
   // Draw a teardrop pin with white inner circle via <canvas>
   function makePinImage(color = '#ef4444', size = 64) {
     const c = document.createElement('canvas');
-    c.width = size;
-    c.height = size;
+    c.width = size; c.height = size;
     const ctx = c.getContext('2d');
 
-    const w = size;
-    const h = size;
+    const w = size, h = size;
     const cx = w / 2;
-    const cy = h * 0.42;   // center of the inner round part
-    const r  = h * 0.22;   // radius of inner circle
-    const tipX = cx;
-    const tipY = h - 2;
+    const cy = h * 0.42;
+    const r  = h * 0.22;
+    const tipX = cx, tipY = h - 2;
 
-    // Teardrop outer shape
     ctx.beginPath();
     ctx.arc(cx, cy, r * 1.35, Math.PI * 0.15, Math.PI * 0.85, true);
     const leftX = cx - r * 1.35;
@@ -390,7 +356,6 @@
     ctx.fillStyle = color;
     ctx.fill();
 
-    // Inner white circle
     ctx.beginPath();
     ctx.arc(cx, cy, r * 0.9, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
@@ -400,24 +365,16 @@
     return { width: w, height: h, data: imageData.data };
   }
 
-  function emptyPoint() {
-    return { type: 'FeatureCollection', features: [] };
-  }
+  function emptyPoint() { return { type: 'FeatureCollection', features: [] }; }
   function pointFeature(lng, lat, props = {}) {
-    return {
-      type: 'Feature',
-      properties: props,
-      geometry: { type: 'Point', coordinates: [lng, lat] }
-    };
+    return { type: 'Feature', properties: props, geometry: { type: 'Point', coordinates: [lng, lat] } };
   }
   function setPointInSource(srcId, lng, lat, props = {}) {
-    const src = map.getSource(srcId);
-    if (!src) return;
+    const src = map.getSource(srcId); if (!src) return;
     src.setData({ type: 'FeatureCollection', features: [pointFeature(lng, lat, props)] });
   }
   function clearPointSource(srcId) {
-    const src = map.getSource(srcId);
-    if (!src) return;
+    const src = map.getSource(srcId); if (!src) return;
     src.setData(emptyPoint());
   }
 
@@ -432,16 +389,10 @@
 
   async function loadLocatorBlockFeatures() {
     if (!map) return;
-
     await waitForSourceTiles('locator-blocks-source');
+    const feats = map.querySourceFeatures('locator-blocks-source', { sourceLayer: 'locator-blocks' });
 
-    const feats = map.querySourceFeatures('locator-blocks-source', {
-      sourceLayer: 'locator-blocks'
-    });
-
-    const processed = [];
-    const seen = new Set();
-
+    const processed = []; const seen = new Set();
     for (const f of feats) {
       const rawName = f?.properties?.name;
       const displayName = toDisplayName(rawName);
@@ -453,15 +404,8 @@
       if (!coords || coords.length < 2) continue;
       const [lng, lat] = coords;
 
-      processed.push({
-        id: f.id ?? displayName,
-        name: displayName,
-        lng,
-        lat,
-        feature: f
-      });
+      processed.push({ id: f.id ?? displayName, name: displayName, lng, lat, feature: f });
     }
-
     properties = processed;
     console.log('Locator blocks (FULL coverage):', properties.length);
   }
@@ -469,8 +413,7 @@
   async function loadLineStringFeatures() {
     try {
       const feats = map.querySourceFeatures('subdivision-blocks-source', {
-        sourceLayer: 'subdivision-blocks',
-        filter: ['==', '$type', 'LineString']
+        sourceLayer: 'subdivision-blocks', filter: ['==', '$type', 'LineString']
       });
       lineStringFeatures = feats.map((f) => ({
         id: f.id ?? `${f.properties?.id ?? Math.random()}`,
@@ -527,19 +470,19 @@
   function setUserPin(lng, lat, accuracy) {
     if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
 
-    // accept FIRST fix immediately to avoid "stuck waiting"
     userLocation = { lng, lat, accuracy };
     hasInitialFix = true;
 
-    // Update in-style user point (no DOM Marker → no floating)
     setPointInSource(USER_SRC, lng, lat, { accuracy });
 
-    // If a destination was queued earlier, start now
     if (pendingDestination) {
       const dest = pendingDestination;
       pendingDestination = null;
       startNavigationToProperty(dest);
     }
+
+    // check proximity on every fix
+    checkProximityNow();
   }
 
   function startTracking() {
@@ -551,7 +494,6 @@
 
     isTracking = true;
 
-    // If map already loaded & control exists, start now; otherwise defer until load
     if (map && isMapLoaded && geolocate) {
       attachGeoWatch();
       try { geolocate.trigger(); } catch {}
@@ -568,7 +510,7 @@
   }
 
   function attachGeoWatch() {
-    if (userLocationWatchId) return; // already watching
+    if (userLocationWatchId) return;
     userLocationWatchId = navigator.geolocation.watchPosition(
       (pos) => setUserPin(pos.coords.longitude, pos.coords.latitude, pos.coords.accuracy),
       (err) => {
@@ -593,7 +535,6 @@
   async function startNavigationToProperty(property) {
     if (!property) return toastError('Select a destination.');
 
-    // Queue if we still don't have a fix
     if (!userLocation) {
       pendingDestination = property;
       toastSuccess(`Selected ${property.name}. Waiting for your location...`);
@@ -602,7 +543,8 @@
 
     stopNavigation();
     isNavigating = true;
-    hasNearAlertFired = false; // NEW: reset nearby alert
+    hasNearAlertFired = false;
+    proximityHistory = [];
 
     try {
       const userCoords = [userLocation.lng, userLocation.lat];
@@ -615,10 +557,8 @@
       let navigationSteps = [];
       let totalDistance = 0;
 
-      // set destination point in-style (no DOM Marker)
       setPointInSource(DEST_SRC, targetCoords[0], targetCoords[1], { name: property.name });
 
-      // CASES
       if (isInside && isTargetInside) {
         await navigateUsingInternalPaths(property, { lng: userCoords[0], lat: userCoords[1] });
         if (!selectedLineString?.coordinates?.length) {
@@ -676,6 +616,7 @@
       currentRoute = { coordinates: routeCoords, distance: totalDistance, steps: navigationSteps };
       displayRoute();
       startNavigationUpdates();
+      checkProximityNow(); // immediate check
     } catch (e) {
       console.error('Navigation error', e);
       toastError('Failed to create route.');
@@ -683,7 +624,6 @@
     }
   }
 
-  // ---- NEW: nearby alert + arrival logic integrated
   function startNavigationUpdates() {
     if (directionUpdateInterval) clearInterval(directionUpdateInterval);
 
@@ -691,8 +631,6 @@
       if (!isTracking || !userLocation || !currentRoute) return;
 
       const userPt = [userLocation.lng, userLocation.lat];
-
-      // Progress along the route
       const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
       const total = currentRoute.distance;
       const traveled = calculatePathDistance(currentRoute.coordinates.slice(0, closestIndex + 1));
@@ -701,25 +639,7 @@
       distanceToDestination = calculateRemainingDistance(closestIndex);
       currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-      // Compute straight-line distance to the actual destination as well
-      const destLngLat = selectedProperty ? [selectedProperty.lng, selectedProperty.lat] : null;
-      const straightLineToDest = destLngLat ? calculateDistance(userPt, destLngLat) : Infinity;
-
-      // One-time "nearby" alert (earlier than arrival)
-      if (!hasNearAlertFired) {
-        const nearMetric = Math.min(distanceToDestination ?? Infinity, straightLineToDest);
-        if (nearMetric <= NEAR_RADIUS_METERS) {
-          hasNearAlertFired = true;
-          toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(nearMetric)}m)`);
-          try { navigator.vibrate?.(120); } catch {}
-        }
-      }
-
-      // Hard arrival
-      const arrivalMetric = Math.min(distanceToDestination ?? Infinity, straightLineToDest);
-      if (arrivalMetric <= ARRIVAL_RADIUS_METERS) {
-        completeNavigation();
-      }
+      checkProximityNow(); // unified proximity checks
     }, 1000);
   }
 
@@ -732,7 +652,6 @@
     if (map?.getLayer('route')) map.removeLayer('route');
     if (map?.getSource('route')) map.removeSource('route');
 
-    // Reset path styling back to default visibility
     if (map?.getLayer('cemetery-paths')) {
       map.setPaintProperty('cemetery-paths', 'line-opacity', 1);
       map.setPaintProperty('cemetery-paths', 'line-color', '#ffffff');
@@ -740,10 +659,10 @@
       map.setFilter('cemetery-paths', ['==', '$type', 'LineString']);
     }
 
-    // clear in-style destination point
     clearPointSource(DEST_SRC);
-
     currentRoute = null;
+    hasNearAlertFired = false;
+    proximityHistory = [];
   }
 
   function displayRoute() {
@@ -803,6 +722,78 @@
       if (accum >= target) return s.instruction;
     }
     return 'Continue to destination';
+  }
+
+  // ================================
+  // Proximity helpers
+  // ================================
+  function effectiveRadii() {
+    const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20; // meters
+    const jitter = Math.max(0, acc - 5);
+    const arrival = BASE_ARRIVAL_M + Math.min(25, jitter) * 0.6;
+    const near    = Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
+    return { arrival, near };
+  }
+
+  function getDestinationPoint() {
+    if (selectedProperty?.lng != null && selectedProperty?.lat != null) {
+      return [selectedProperty.lng, selectedProperty.lat];
+    }
+    const src = map.getSource(DEST_SRC);
+    const fc = src?.serialize ? src.serialize().data : src?._data || src?.data;
+    const feat = fc?.features?.[0];
+    if (feat?.geometry?.type === 'Point') return feat.geometry.coordinates;
+    return null;
+  }
+
+  function checkProximityNow() {
+    if (!userLocation || !isNavigating) return;
+
+    const now = Date.now();
+    if (now - lastProximityCheckTs < 200) return; // debounce a bit
+    lastProximityCheckTs = now;
+
+    const userPt = [userLocation.lng, userLocation.lat];
+    const destPt = getDestinationPoint();
+    if (!destPt) return;
+
+    const straight = calculateDistance(userPt, destPt);
+
+    let along = Infinity;
+    if (currentRoute?.coordinates?.length) {
+      const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
+      along = calculateRemainingDistance(closestIndex);
+    }
+
+    const metric = Math.min(straight, along);
+    const { near, arrival } = effectiveRadii();
+
+    proximityHistory.push({ t: now, d: metric });
+    if (proximityHistory.length > 30) proximityHistory.shift();
+
+    if (!hasNearAlertFired && metric <= near) {
+      hasNearAlertFired = true;
+      toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
+      try { navigator.vibrate?.(120); } catch {}
+    }
+
+    if (metric <= arrival) {
+      completeNavigation();
+      return;
+    }
+
+    if (metric <= near) {
+      const cutoff = now - STALL_WINDOW_S * 1000;
+      const recent = proximityHistory.filter(p => p.t >= cutoff);
+      if (recent.length >= 2) {
+        const earliest = recent[0].d;
+        const latest = recent[recent.length - 1].d;
+        const improved = earliest - latest;
+        if (improved < STALL_DELTA_M) {
+          completeNavigation();
+        }
+      }
+    }
   }
 
   // ================================
@@ -912,12 +903,9 @@
     const steps = [];
     for (let i = 0; i < coordinates.length - 1; i++) {
       steps.push({
-        instruction:
-          i === 0
-            ? 'Start on cemetery path'
-            : i === coordinates.length - 2
-            ? 'Arrive at destination'
-            : 'Continue on path',
+        instruction: i === 0 ? 'Start on cemetery path'
+                 : i === coordinates.length - 2 ? 'Arrive at destination'
+                 : 'Continue on path',
         distance: calculateDistance(coordinates[i], coordinates[i + 1]),
       });
     }
@@ -1036,7 +1024,6 @@
   // Helpers
   // ================================
   function getCemeteryBoundary() {
-    // Rough bounding box (adjust if needed)
     return [
       [120.975, 14.470],
       [120.978, 14.470],
@@ -1046,7 +1033,6 @@
     ];
   }
   function pointInPolygon(point, polygon) {
-    // ray-casting
     let inside = false;
     for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
       const xi = polygon[i][0], yi = polygon[i][1];
@@ -1088,9 +1074,7 @@
     if (!Array.isArray(arr)) return [];
     const out = [];
     for (const c of arr) {
-      if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) {
-        out.push(c);
-      }
+      if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) out.push(c);
     }
     return out;
   }
@@ -1135,9 +1119,7 @@
     matchName = val;
     if (!val.trim()) return;
     const exact = getFeatureByName(val);
-    if (exact) {
-      selectedProperty = exact;
-    }
+    if (exact) selectedProperty = exact;
   }
 
   function goNavigate() {
