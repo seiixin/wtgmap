@@ -198,97 +198,167 @@
     });
   }
 
-  function addCemeterySourcesAndLayers() {
-    if (!map.getSource('subdivision-blocks-source')) {
-      map.addSource('subdivision-blocks-source', {
-        type: 'vector',
-        url: 'mapbox://intellitech.cmdysziqy2z5w1ppbaq7avd4f-1cy1n'
-      });
-    }
-
-    if (!map.getSource('locator-blocks-source')) {
-      map.addSource('locator-blocks-source', {
-        type: 'vector',
-        url: 'mapbox://intellitech.cme0cp8bs0ato1plqyzz7xcp8-1904w'
-      });
-    }
-
-    if (!map.getLayer('cemetery-paths')) {
-      map.addLayer({
-        id: 'cemetery-paths',
-        type: 'line',
-        source: 'subdivision-blocks-source',
-        'source-layer': 'subdivision-blocks',
-        paint: { 'line-color': '#ffffff', 'line-width': 3, 'line-opacity': 1 },
-        filter: ['==', '$type', 'LineString']
-      });
-    }
-
-    if (!map.getLayer('locator-blocks')) {
-      map.addLayer({
-        id: 'locator-blocks',
-        type: 'circle',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        paint: {
-          'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 6, 20, 10, 22, 14],
-          'circle-color': '#ef4444',
-          'circle-stroke-width': 3,
-          'circle-stroke-color': 'transparent',
-          'circle-opacity': 0.0
-        }
-      });
-    }
-
-    if (!map.getLayer('block-markers')) {
-      map.addLayer({
-        id: 'block-markers',
-        type: 'circle',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        paint: { 'circle-radius': 4, 'circle-color': '#008000', 'circle-opacity': 0.5 }
-      });
-    }
-
-    if (!map.getLayer('block-labels')) {
-      map.addLayer({
-        id: 'block-labels',
-        type: 'symbol',
-        source: 'locator-blocks-source',
-        'source-layer': 'locator-blocks',
-        layout: {
-          'text-field': ['get', 'name'],
-          'text-size': 11,
-          'text-offset': [0, 1.5],
-          'text-anchor': 'top',
-          'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold']
-        },
-        paint: {
-          'text-color': '#374151',
-          'text-halo-color': '#ffffff',
-          'text-halo-width': 1
-        }
-      });
-    }
-
-    map.on('click', 'block-markers', (e) => {
-      const f = e.features?.[0];
-      const name = f?.properties?.name;
-      if (!name) return;
-
-      const [lng, lat] = f.geometry.coordinates;
-      const property = { id: f.id ?? name, name, lng, lat, feature: f };
-      selectedProperty = property;
-      matchName = name;
-
-      goto(`/graves/${encodeURIComponent(name)}`);
-      startNavigationToProperty(property);
-      toastSuccess(`Selected: ${name}`);
+function addCemeterySourcesAndLayers() {
+  // --- sources
+  if (!map.getSource('subdivision-blocks-source')) {
+    map.addSource('subdivision-blocks-source', {
+      type: 'vector',
+      url: 'mapbox://intellitech.cmdysziqy2z5w1ppbaq7avd4f-1cy1n' // paths (LineString)
     });
-
-    map.on('mouseenter', 'block-markers', () => (map.getCanvas().style.cursor = 'pointer'));
-    map.on('mouseleave', 'block-markers', () => (map.getCanvas().style.cursor = ''));
   }
+
+  // NEW: polygons/multipolygons tileset for block shapes
+  if (!map.getSource('subdivision-shapes-source')) {
+    map.addSource('subdivision-shapes-source', {
+      type: 'vector',
+      url: 'mapbox://intellitech.cme0cjopc10cw1mn11nkghf53-1j2jx' // polygons
+    });
+  }
+
+  if (!map.getSource('locator-blocks-source')) {
+    map.addSource('locator-blocks-source', {
+      type: 'vector',
+      url: 'mapbox://intellitech.cme0cp8bs0ato1plqyzz7xcp8-1904w'
+    });
+  }
+
+  // --- path lines (kept on top of fills)
+  if (!map.getLayer('cemetery-paths')) {
+    map.addLayer({
+      id: 'cemetery-paths',
+      type: 'line',
+      source: 'subdivision-blocks-source',
+      'source-layer': 'subdivision-blocks',
+      filter: ['==', '$type', 'LineString'],
+      paint: {
+        'line-color': '#ffffff',
+        'line-width': 0,
+        'line-opacity': 0 
+      }
+    });
+  }
+
+  // --- NEW: subdivision polygon fills (rendered UNDER the white paths)
+  // note: $type returns 'Polygon' for both Polygon and MultiPolygon, so this catches both.
+// --- subdivision polygon fills (PURE WHITE), rendered under the white paths
+if (!map.getLayer('subdivision-blocks-fill')) {
+  map.addLayer(
+    {
+      id: 'subdivision-blocks-fill',
+      type: 'fill',
+      source: 'subdivision-shapes-source',
+      'source-layer': 'subdivision-blocks', // adjust if your layer name differs
+      filter: ['==', '$type', 'Polygon'],
+      paint: {
+        'fill-color': '#ffffff',        // PURE WHITE
+        'fill-opacity': 1,              // fully opaque
+        'fill-outline-color': '#ffffff' // white outline (invisible against fill)
+      }
+    },
+    'cemetery-paths' // keep under the path lines
+  );
+} else {
+  // if the layer already exists, force it to white
+  map.setPaintProperty('subdivision-blocks-fill', 'fill-color', '#ffffff');
+  map.setPaintProperty('subdivision-blocks-fill', 'fill-opacity', 1);
+  map.setPaintProperty('subdivision-blocks-fill', 'fill-outline-color', '#ffffff');
+}
+
+// OPTIONAL: remove the separate stroke layer if you previously added it
+if (map.getLayer('subdivision-blocks-stroke')) {
+  map.removeLayer('subdivision-blocks-stroke');
+}
+
+  // optional: thin stroke above the fill but still under paths (for crisper edges)
+  if (!map.getLayer('subdivision-blocks-stroke')) {
+    map.addLayer(
+      {
+        id: 'subdivision-blocks-stroke',
+        type: 'line',
+        source: 'subdivision-shapes-source',
+        'source-layer': 'subdivision-blocks', // <- adjust if needed
+        filter: ['==', '$type', 'Polygon'],
+        paint: {
+          'line-color': '#0f766e',
+          'line-width': 0.8,
+          'line-opacity': 0.6
+        }
+      },
+      'cemetery-paths'
+    );
+  }
+
+  // --- locator points + labels (unchanged)
+  if (!map.getLayer('locator-blocks')) {
+    map.addLayer({
+      id: 'locator-blocks',
+      type: 'circle',
+      source: 'locator-blocks-source',
+      'source-layer': 'locator-blocks',
+      paint: {
+        'circle-radius': ['interpolate', ['linear'], ['zoom'], 15, 6, 20, 10, 22, 14],
+        'circle-color': '#ef4444',
+        'circle-stroke-width': 3,
+        'circle-stroke-color': 'transparent',
+        'circle-opacity': 0.0
+      }
+    });
+  }
+
+  if (!map.getLayer('block-markers')) {
+    map.addLayer({
+      id: 'block-markers',
+      type: 'circle',
+      source: 'locator-blocks-source',
+      'source-layer': 'locator-blocks',
+      paint: {
+        'circle-radius': 4,
+        'circle-color': '#008000',
+        'circle-opacity': 0.5
+      }
+    });
+  }
+
+  if (!map.getLayer('block-labels')) {
+    map.addLayer({
+      id: 'block-labels',
+      type: 'symbol',
+      source: 'locator-blocks-source',
+      'source-layer': 'locator-blocks',
+      layout: {
+        'text-field': ['get', 'name'],
+        'text-size': 8,
+        'text-offset': [0, 1.5],
+        'text-anchor': 'top',
+        'text-font': ['Open Sans Semibold', 'Arial Unicode MS Bold']
+      },
+      paint: {
+        'text-color': '#374151',
+        'text-halo-color': '#ffffff',
+        'text-halo-width': 1
+      }
+    });
+  }
+
+  // interactions
+  map.on('click', 'block-markers', (e) => {
+    const f = e.features?.[0];
+    const name = f?.properties?.name;
+    if (!name) return;
+
+    const [lng, lat] = f.geometry.coordinates;
+    const property = { id: f.id ?? name, name, lng, lat, feature: f };
+    selectedProperty = property;
+    matchName = name;
+
+    goto(`/graves/${encodeURIComponent(name)}`);
+    startNavigationToProperty(property);
+    toastSuccess(`Selected: ${name}`);
+  });
+
+  map.on('mouseenter', 'block-markers', () => (map.getCanvas().style.cursor = 'pointer'));
+  map.on('mouseleave', 'block-markers', () => (map.getCanvas().style.cursor = ''));
+}
 
   // --- in-style user/destination point sources & SYMBOL layers (pin icons)
   function addUserAndDestinationLayers() {
@@ -862,7 +932,7 @@
 
     selectedLineString = { id: 'internal', coordinates: chain };
 
-    map.setPaintProperty('cemetery-paths', 'line-opacity', 0.35);
+    map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
     map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
     map.setPaintProperty('cemetery-paths', 'line-width', 2);
   }
