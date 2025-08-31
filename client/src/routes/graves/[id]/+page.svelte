@@ -67,15 +67,12 @@
   ];
 
   // ================================
-  // Proximity logic (adaptive + stall fallback)
+  // Proximity logic — HARD 10m arrival
   // ================================
-  const BASE_ARRIVAL_M = 12;  // base hard-arrival (will expand with poor accuracy)
-  const BASE_NEAR_M    = 70;  // early "malapit na" alert
-  const STALL_WINDOW_S = 6;   // seconds window to consider "stalled"
-  const STALL_DELTA_M  = 2;   // improvement threshold within window
+  const ARRIVAL_THRESHOLD_M = 10; // auto-stop only at ≤10m
+  const BASE_NEAR_M    = 70;      // early "malapit na" alert
   let hasNearAlertFired = $state(false);
-  let hasArrivedOnce    = $state(false); // <<< NEW: one-shot arrival guard
-  let proximityHistory = [];
+  let hasArrivedOnce    = $state(false);
   let lastProximityCheckTs = 0;
 
   // ================================
@@ -349,7 +346,7 @@
     ctx.beginPath();
     ctx.arc(cx, cy, r * 1.35, Math.PI * 0.15, Math.PI * 0.85, true);
     const leftX = cx - r * 1.35;
-       const rightX = cx + r * 1.35;
+    const rightX = cx + r * 1.35;
     const sideY = cy + r * 0.9;
     ctx.quadraticCurveTo(leftX, sideY + r * 1.3, tipX, tipY);
     ctx.quadraticCurveTo(rightX, sideY + r * 1.3, rightX, cy);
@@ -543,11 +540,11 @@
       return;
     }
 
+    // reset nav state
     stopNavigation();
     isNavigating = true;
     hasNearAlertFired = false;
-    hasArrivedOnce = false;      // <<< reset one-shot guard on new nav
-    proximityHistory = [];
+    hasArrivedOnce = false;
 
     try {
       const userCoords = [userLocation.lng, userLocation.lat];
@@ -665,9 +662,7 @@
     clearPointSource(DEST_SRC);
     currentRoute = null;
     hasNearAlertFired = false;
-    // IMPORTANT: do not reset hasArrivedOnce here — we need the guard
-    // to prevent repeat alerts until a new navigation starts.
-    proximityHistory = [];
+    // NOTE: keep hasArrivedOnce as-is to guard until a new nav starts.
   }
 
   function displayRoute() {
@@ -694,25 +689,23 @@
     map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
   }
 
-function completeNavigation() {
-  stopNavigation();
-  toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
-  showConfirmation({
-    title: 'Navigate to Exit?',
-    message: 'Do you want directions back to the nearest entrance?',
-    confirmText: 'Yes, guide me',
-    cancelText: 'No, stay here',
-    onConfirm: () => {
-      showExitPopup = false;           // isara modal
-      window.location.replace('/graves/Main%20Gate'); 
-      // tip: gamitin window.location.assign(...) kung gusto mong manatili sa history
-    },
-    onCancel: () => {
-      toastSuccess('Navigation ended. You can exit at your own pace.');
-    }
-  });
-}
-
+  function completeNavigation() {
+    stopNavigation();
+    toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
+    showConfirmation({
+      title: 'Navigate to Exit?',
+      message: 'Do you want directions back to the nearest entrance?',
+      confirmText: 'Yes, guide me',
+      cancelText: 'No, stay here',
+      onConfirm: () => {
+        showExitPopup = false;
+        window.location.replace('/graves/Main%20Gate');
+      },
+      onCancel: () => {
+        toastSuccess('Navigation ended. You can exit at your own pace.');
+      }
+    });
+  }
 
   function calculateRemainingDistance(startIdx) {
     let d = 0;
@@ -732,14 +725,13 @@ function completeNavigation() {
   }
 
   // ================================
-  // Proximity helpers
+  // Proximity helpers (10m hard stop)
   // ================================
-  function effectiveRadii() {
+  function effectiveNearRadius() {
     const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20; // meters
     const jitter = Math.max(0, acc - 5);
-    const arrival = BASE_ARRIVAL_M + Math.min(25, jitter) * 0.6;
-    const near    = Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
-    return { arrival, near };
+    // keep near adaptive but bounded
+    return Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
   }
 
   function getDestinationPoint() {
@@ -755,10 +747,10 @@ function completeNavigation() {
 
   function checkProximityNow() {
     if (!userLocation || !isNavigating) return;
-    if (hasArrivedOnce) return; // <<< do not run checks after arrival until new nav
+    if (hasArrivedOnce) return;
 
     const now = Date.now();
-    if (now - lastProximityCheckTs < 200) return; // debounce a bit
+    if (now - lastProximityCheckTs < 200) return; // debounce
     lastProximityCheckTs = now;
 
     const userPt = [userLocation.lng, userLocation.lat];
@@ -774,33 +766,20 @@ function completeNavigation() {
     }
 
     const metric = Math.min(straight, along);
-    const { near, arrival } = effectiveRadii();
 
-    proximityHistory.push({ t: now, d: metric });
-    if (proximityHistory.length > 30) proximityHistory.shift();
-
+    // Near alert (kept)
+    const near = effectiveNearRadius();
     if (!hasNearAlertFired && metric <= near) {
       hasNearAlertFired = true;
       toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
       try { navigator.vibrate?.(120); } catch {}
     }
 
-    if (metric <= arrival) {
+    // ARRIVAL: ONLY at ≤10m
+    if (metric <= ARRIVAL_THRESHOLD_M) {
+      hasArrivedOnce = true; // guard
       completeNavigation();
       return;
-    }
-
-    if (metric <= near) {
-      const cutoff = now - STALL_WINDOW_S * 1000;
-      const recent = proximityHistory.filter(p => p.t >= cutoff);
-      if (recent.length >= 2) {
-        const earliest = recent[0].d;
-        const latest = recent[recent.length - 1].d;
-        const improved = earliest - latest;
-        if (improved < STALL_DELTA_M) {
-          completeNavigation();
-        }
-      }
     }
   }
 
@@ -934,7 +913,7 @@ function completeNavigation() {
       for (let i = 0; i < C.length; i++) {
         const a = C[i], aid = addNode(a);
         if (i < C.length - 1) {
-                   const b = C[i + 1], bid = addNode(b);
+          const b = C[i + 1], bid = addNode(b);
           const w = calculateDistance(a, b);
           edges[aid].push({ to: bid, weight: w });
           edges[bid].push({ to: aid, weight: w });
