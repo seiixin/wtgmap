@@ -702,12 +702,17 @@ function completeNavigation() {
     message: 'Do you want directions back to the nearest entrance?',
     confirmText: 'Yes, guide me',
     cancelText: 'No, stay here',
-    onConfirm: () => goto('/graves/Main%20Gate'),
+    onConfirm: () => {
+      showExitPopup = false;           // isara modal
+      window.location.replace('/graves/Main%20Gate'); 
+      // tip: gamitin window.location.assign(...) kung gusto mong manatili sa history
+    },
     onCancel: () => {
       toastSuccess('Navigation ended. You can exit at your own pace.');
     }
   });
 }
+
 
   function calculateRemainingDistance(startIdx) {
     let d = 0;
