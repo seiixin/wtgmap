@@ -69,6 +69,13 @@
   ];
 
   // ================================
+  // Proximity settings (NEW)
+  // ================================
+  const ARRIVAL_RADIUS_METERS = 8;   // hard arrival threshold
+  const NEAR_RADIUS_METERS    = 35;  // “malapit na” alert threshold
+  let hasNearAlertFired = $state(false);
+
+  // ================================
   // Lifecycle
   // ================================
   onMount(async () => {
@@ -338,7 +345,7 @@
         source: DEST_SRC,
         layout: {
           'icon-image': 'pin-dest',
-          'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.6, 20, 1.0],
+          'icon-size': ['interpolate', ['linear'], ['zoom'], 14, 0.45, 20, 0.9],
           'icon-allow-overlap': true,
           'icon-anchor': 'bottom'
         }
@@ -595,6 +602,7 @@
 
     stopNavigation();
     isNavigating = true;
+    hasNearAlertFired = false; // NEW: reset nearby alert
 
     try {
       const userCoords = [userLocation.lng, userLocation.lat];
@@ -675,17 +683,17 @@
     }
   }
 
+  // ---- NEW: nearby alert + arrival logic integrated
   function startNavigationUpdates() {
     if (directionUpdateInterval) clearInterval(directionUpdateInterval);
 
     directionUpdateInterval = setInterval(() => {
       if (!isTracking || !userLocation || !currentRoute) return;
 
-      const { closestIndex } = findClosestPointOnRoute(
-        [userLocation.lng, userLocation.lat],
-        currentRoute.coordinates
-      );
+      const userPt = [userLocation.lng, userLocation.lat];
 
+      // Progress along the route
+      const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
       const total = currentRoute.distance;
       const traveled = calculatePathDistance(currentRoute.coordinates.slice(0, closestIndex + 1));
 
@@ -693,7 +701,23 @@
       distanceToDestination = calculateRemainingDistance(closestIndex);
       currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-      if (distanceToDestination < 8) {
+      // Compute straight-line distance to the actual destination as well
+      const destLngLat = selectedProperty ? [selectedProperty.lng, selectedProperty.lat] : null;
+      const straightLineToDest = destLngLat ? calculateDistance(userPt, destLngLat) : Infinity;
+
+      // One-time "nearby" alert (earlier than arrival)
+      if (!hasNearAlertFired) {
+        const nearMetric = Math.min(distanceToDestination ?? Infinity, straightLineToDest);
+        if (nearMetric <= NEAR_RADIUS_METERS) {
+          hasNearAlertFired = true;
+          toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(nearMetric)}m)`);
+          try { navigator.vibrate?.(120); } catch {}
+        }
+      }
+
+      // Hard arrival
+      const arrivalMetric = Math.min(distanceToDestination ?? Infinity, straightLineToDest);
+      if (arrivalMetric <= ARRIVAL_RADIUS_METERS) {
         completeNavigation();
       }
     }, 1000);
@@ -1126,8 +1150,6 @@
     startNavigationToProperty(selectedProperty);
   }
 </script>
-
-
 <!-- ================================
      UI
 ================================== -->
