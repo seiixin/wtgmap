@@ -689,23 +689,35 @@
     map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
   }
 
-  function completeNavigation() {
-    stopNavigation();
-    toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
-    showConfirmation({
-      title: 'Navigate to Exit?',
-      message: 'Do you want directions back to the nearest entrance?',
-      confirmText: 'Yes, guide me',
-      cancelText: 'No, stay here',
-      onConfirm: () => {
-        const gate = findNearestEntrance(userLocation ?? { lng: selectedProperty.lng, lat: selectedProperty.lat });
-        startNavigationToProperty(gate);
-      },
-      onCancel: () => {
-        toastSuccess('Navigation ended. You can exit at your own pace.');
-      }
-    });
-  }
+function completeNavigation() {
+  stopNavigation();
+  toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
+  showConfirmation({
+    title: 'Navigate to Exit?',
+    message: 'Do you want directions back to the nearest entrance?',
+    confirmText: 'Yes, guide me',
+    cancelText: 'No, stay here',
+    onConfirm: () => {
+      // push route to /graves/Main%20Gate
+      goto('/graves/Main%20Gate');
+
+      // use nearest entrance coords, but label as "Main Gate"
+      const nearest = findNearestEntrance(
+        userLocation ?? { lng: selectedProperty?.lng, lat: selectedProperty?.lat }
+      );
+      const gate = { name: 'Main Gate', lng: nearest.lng, lat: nearest.lat };
+
+      // set selection + navigate
+      selectedProperty = gate;
+      matchName = gate.name;
+      startNavigationToProperty(gate);
+    },
+    onCancel: () => {
+      toastSuccess('Navigation ended. You can exit at your own pace.');
+    }
+  });
+}
+
 
   function calculateRemainingDistance(startIdx) {
     let d = 0;
