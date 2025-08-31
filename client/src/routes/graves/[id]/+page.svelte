@@ -67,15 +67,10 @@
   ];
 
   // ================================
-  // Proximity logic (adaptive + stall fallback)
+  // Arrival radius (FIXED 10m)
   // ================================
-  const BASE_ARRIVAL_M = 12;  // base hard-arrival (will expand with poor accuracy)
-  const BASE_NEAR_M    = 70;  // early "malapit na" alert
-  const STALL_WINDOW_S = 6;   // seconds window to consider "stalled"
-  const STALL_DELTA_M  = 2;   // improvement threshold within window
-  let hasNearAlertFired = $state(false);
-  let proximityHistory = [];
-  let lastProximityCheckTs = 0;
+  const ARRIVAL_RADIUS_M = 10;
+  let lastArrivalCheckTs = 0;
 
   // ================================
   // Lifecycle
@@ -347,7 +342,7 @@
     ctx.beginPath();
     ctx.arc(cx, cy, r * 1.35, Math.PI * 0.15, Math.PI * 0.85, true);
     const leftX = cx - r * 1.35;
-    const rightX = cx + r * 1.35;
+       const rightX = cx + r * 1.35;
     const sideY = cy + r * 0.9;
     ctx.quadraticCurveTo(leftX, sideY + r * 1.3, tipX, tipY);
     ctx.quadraticCurveTo(rightX, sideY + r * 1.3, rightX, cy);
@@ -481,8 +476,8 @@
       startNavigationToProperty(dest);
     }
 
-    // check proximity on every fix
-    checkProximityNow();
+    // check arrival on every fix
+    checkArrivalNow();
   }
 
   function startTracking() {
@@ -543,8 +538,6 @@
 
     stopNavigation();
     isNavigating = true;
-    hasNearAlertFired = false;
-    proximityHistory = [];
 
     try {
       const userCoords = [userLocation.lng, userLocation.lat];
@@ -616,7 +609,7 @@
       currentRoute = { coordinates: routeCoords, distance: totalDistance, steps: navigationSteps };
       displayRoute();
       startNavigationUpdates();
-      checkProximityNow(); // immediate check
+      checkArrivalNow(); // immediate check
     } catch (e) {
       console.error('Navigation error', e);
       toastError('Failed to create route.');
@@ -639,7 +632,7 @@
       distanceToDestination = calculateRemainingDistance(closestIndex);
       currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-      checkProximityNow(); // unified proximity checks
+      checkArrivalNow();
     }, 1000);
   }
 
@@ -661,8 +654,6 @@
 
     clearPointSource(DEST_SRC);
     currentRoute = null;
-    hasNearAlertFired = false;
-    proximityHistory = [];
   }
 
   function displayRoute() {
@@ -689,22 +680,20 @@
     map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
   }
 
-function completeNavigation() {
-  stopNavigation();
-  toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
-  showConfirmation({
-    title: 'Navigate to Exit?',
-    message: 'Do you want directions back to the nearest entrance?',
-    confirmText: 'Yes, guide me',
-    cancelText: 'No, stay here',
-    onConfirm: () => goto('/graves/Main%20Gate'),
-    onCancel: () => {
-      toastSuccess('Navigation ended. You can exit at your own pace.');
-    }
-  });
-}
-
-
+  function completeNavigation() {
+    stopNavigation();
+    toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
+    showConfirmation({
+      title: 'Navigate to Exit?',
+      message: 'Do you want directions back to the nearest entrance?',
+      confirmText: 'Yes, guide me',
+      cancelText: 'No, stay here',
+      onConfirm: () => goto('/graves/Main%20Gate'),
+      onCancel: () => {
+        toastSuccess('Navigation ended. You can exit at your own pace.');
+      }
+    });
+  }
 
   function calculateRemainingDistance(startIdx) {
     let d = 0;
@@ -724,16 +713,8 @@ function completeNavigation() {
   }
 
   // ================================
-  // Proximity helpers
+  // Arrival-only proximity (10m)
   // ================================
-  function effectiveRadii() {
-    const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20; // meters
-    const jitter = Math.max(0, acc - 5);
-    const arrival = BASE_ARRIVAL_M + Math.min(25, jitter) * 0.6;
-    const near    = Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
-    return { arrival, near };
-  }
-
   function getDestinationPoint() {
     if (selectedProperty?.lng != null && selectedProperty?.lat != null) {
       return [selectedProperty.lng, selectedProperty.lat];
@@ -745,19 +726,18 @@ function completeNavigation() {
     return null;
   }
 
-  function checkProximityNow() {
+  function checkArrivalNow() {
     if (!userLocation || !isNavigating) return;
 
     const now = Date.now();
-    if (now - lastProximityCheckTs < 200) return; // debounce a bit
-    lastProximityCheckTs = now;
+    if (now - lastArrivalCheckTs < 200) return; // light debounce
+    lastArrivalCheckTs = now;
 
     const userPt = [userLocation.lng, userLocation.lat];
     const destPt = getDestinationPoint();
     if (!destPt) return;
 
     const straight = calculateDistance(userPt, destPt);
-
     let along = Infinity;
     if (currentRoute?.coordinates?.length) {
       const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
@@ -765,33 +745,9 @@ function completeNavigation() {
     }
 
     const metric = Math.min(straight, along);
-    const { near, arrival } = effectiveRadii();
 
-    proximityHistory.push({ t: now, d: metric });
-    if (proximityHistory.length > 30) proximityHistory.shift();
-
-    if (!hasNearAlertFired && metric <= near) {
-      hasNearAlertFired = true;
-      toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
-      try { navigator.vibrate?.(120); } catch {}
-    }
-
-    if (metric <= arrival) {
+    if (metric <= ARRIVAL_RADIUS_M) {
       completeNavigation();
-      return;
-    }
-
-    if (metric <= near) {
-      const cutoff = now - STALL_WINDOW_S * 1000;
-      const recent = proximityHistory.filter(p => p.t >= cutoff);
-      if (recent.length >= 2) {
-        const earliest = recent[0].d;
-        const latest = recent[recent.length - 1].d;
-        const improved = earliest - latest;
-        if (improved < STALL_DELTA_M) {
-          completeNavigation();
-        }
-      }
     }
   }
 
@@ -1131,6 +1087,7 @@ function completeNavigation() {
     startNavigationToProperty(selectedProperty);
   }
 </script>
+
 <!-- ================================
      UI
 ================================== -->
