@@ -1,5 +1,3 @@
-recode this whole, make the radius of detecting arrival or stop navigation to 10 meters only
-
 <script>
   import { onMount } from 'svelte';
   import mapboxgl from 'mapbox-gl';
@@ -76,6 +74,7 @@ recode this whole, make the radius of detecting arrival or stop navigation to 10
   const STALL_WINDOW_S = 6;   // seconds window to consider "stalled"
   const STALL_DELTA_M  = 2;   // improvement threshold within window
   let hasNearAlertFired = $state(false);
+  let hasArrivedOnce    = $state(false); // <<< NEW: one-shot arrival guard
   let proximityHistory = [];
   let lastProximityCheckTs = 0;
 
@@ -133,6 +132,7 @@ recode this whole, make the radius of detecting arrival or stop navigation to 10
     }
   });
 
+  // Keep matchName synced with selectedProperty
   $effect(() => {
     if (selectedProperty?.name && selectedProperty.name !== matchName) {
       matchName = selectedProperty.name;
@@ -349,7 +349,7 @@ recode this whole, make the radius of detecting arrival or stop navigation to 10
     ctx.beginPath();
     ctx.arc(cx, cy, r * 1.35, Math.PI * 0.15, Math.PI * 0.85, true);
     const leftX = cx - r * 1.35;
-    const rightX = cx + r * 1.35;
+       const rightX = cx + r * 1.35;
     const sideY = cy + r * 0.9;
     ctx.quadraticCurveTo(leftX, sideY + r * 1.3, tipX, tipY);
     ctx.quadraticCurveTo(rightX, sideY + r * 1.3, rightX, cy);
@@ -546,6 +546,7 @@ recode this whole, make the radius of detecting arrival or stop navigation to 10
     stopNavigation();
     isNavigating = true;
     hasNearAlertFired = false;
+    hasArrivedOnce = false;      // <<< reset one-shot guard on new nav
     proximityHistory = [];
 
     try {
@@ -664,6 +665,8 @@ recode this whole, make the radius of detecting arrival or stop navigation to 10
     clearPointSource(DEST_SRC);
     currentRoute = null;
     hasNearAlertFired = false;
+    // IMPORTANT: do not reset hasArrivedOnce here — we need the guard
+    // to prevent repeat alerts until a new navigation starts.
     proximityHistory = [];
   }
 
@@ -706,8 +709,6 @@ function completeNavigation() {
   });
 }
 
-
-
   function calculateRemainingDistance(startIdx) {
     let d = 0;
     const coords = currentRoute.coordinates;
@@ -749,6 +750,7 @@ function completeNavigation() {
 
   function checkProximityNow() {
     if (!userLocation || !isNavigating) return;
+    if (hasArrivedOnce) return; // <<< do not run checks after arrival until new nav
 
     const now = Date.now();
     if (now - lastProximityCheckTs < 200) return; // debounce a bit
@@ -927,7 +929,7 @@ function completeNavigation() {
       for (let i = 0; i < C.length; i++) {
         const a = C[i], aid = addNode(a);
         if (i < C.length - 1) {
-          const b = C[i + 1], bid = addNode(b);
+                   const b = C[i + 1], bid = addNode(b);
           const w = calculateDistance(a, b);
           edges[aid].push({ to: bid, weight: w });
           edges[bid].push({ to: aid, weight: w });
@@ -1133,6 +1135,7 @@ function completeNavigation() {
     startNavigationToProperty(selectedProperty);
   }
 </script>
+
 
 <!-- ================================
      UI
