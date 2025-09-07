@@ -590,11 +590,13 @@ function stopTracking() {
 // ================================
 const OFF_ROUTE_REROUTE_M = 25;      // user deviates > this => reroute
 const REROUTE_MIN_MS = 8000;
-const ARRIVAL_CONFIRM_TICKS = 2;     // need N consecutive checks under 10 m
+const ARRIVAL_THRESHOLD_M = 10;      // strict: must be <= 10 m along-route
+const ARRIVAL_CONFIRM_TICKS = 2;     // need N consecutive checks under threshold
 let arrivalStreak = 0;
 
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
+let lastProximityCheckTs = 0;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
@@ -842,27 +844,27 @@ function checkProximityNow() {
   const userPt = [userLocation.lng, userLocation.lat];
   const destPt = getDestinationPoint(); if (!destPt) return;
 
+  // 1) Straight-line distance (for "near" feel)
   const straight = calculateDistance(userPt, destPt);
 
-  // Use the trimmed (follow-me) route for "along" distance
-  let along = Infinity;
+  // 2) Remaining ALONG the route (for ARRIVAL only)
+  let alongRemaining = Infinity;
   if (currentRoute?.coordinates?.length) {
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
-    along = calculatePathDistance(trimmed);
+    alongRemaining = calculatePathDistance(trimmed);
   }
 
-  const metric = Math.min(straight, along);
-
-  // Near alert (independent of arrival)
+  // --- NEAR alert: use whichever is smaller so it feels responsive ---
+  const nearMetric = Math.min(straight, alongRemaining);
   const near = effectiveNearRadius();
-  if (!hasNearAlertFired && metric <= near) {
+  if (!hasNearAlertFired && nearMetric <= near) {
     hasNearAlertFired = true;
-    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
+    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(nearMetric)}m)`);
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // HARD arrival: must be <= 10 m, and confirmed for a couple of ticks
-  if (metric <= ARRIVAL_THRESHOLD_M) {
+  // --- ARRIVAL: ONLY when the remaining route <= 10 m (strict) ---
+  if (alongRemaining <= ARRIVAL_THRESHOLD_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
       hasArrivedOnce = true;
@@ -1213,7 +1215,7 @@ function toastSuccess(message) {
 }
 function toastError(message) {
   errorMessage = message;
-  setTimeout(() => { if (errorMessage === message) successMessage = null; }, 5000);
+  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
   console.error('[ERR]', message);
 }
 
