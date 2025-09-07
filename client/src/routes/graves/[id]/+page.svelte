@@ -536,6 +536,9 @@ if (map.getLayer('subdivision-blocks-stroke')) {
 // ================================
 // Geolocation
 // ================================
+// ================================
+// Geolocation
+// ================================
 function setUserPin(lng, lat, accuracy) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
   userLocation = { lng, lat, accuracy };
@@ -589,6 +592,11 @@ function stopTracking() {
 // ================================
 // Navigation
 // ================================
+const OFF_ROUTE_REROUTE_M = 25;      // user deviates > this => reroute
+const REROUTE_MIN_MS = 8000;
+let lastRerouteTs = 0;
+let routeBoundsFittedOnce = false;
+
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
 
@@ -602,6 +610,7 @@ async function startNavigationToProperty(property) {
   isNavigating = true;
   hasNearAlertFired = false;
   hasArrivedOnce = false;
+  routeBoundsFittedOnce = false;
 
   try {
     const user = [userLocation.lng, userLocation.lat];
@@ -618,7 +627,7 @@ async function startNavigationToProperty(property) {
 
     // ---------- CASES ----------
     if (userInside && destInside) {
-      const plan = planInternalPath({ lng: user[0], lat: user[1] }, property);
+      const plan = planInternalPathStrict({ lng: user[0], lat: user[1] }, property);
       if (!plan.coords.length) { toastError('No internal route found.'); return stopNavigation(); }
       const leg = clipRouteToDestination(plan.coords, dest, 6);
       routeCoords = mergeRouteLegs(routeCoords, leg);
@@ -635,9 +644,9 @@ async function startNavigationToProperty(property) {
       }
 
     } else if (userInside && !destInside) {
-      // inside -> best exit gate -> outside to dest
       const gate = await chooseBestEntrance({ lng: user[0], lat: user[1] }, property, 'exit');
-      const insidePlan = planInternalPath({ lng: user[0], lat: user[1] }, gate);
+
+      const insidePlan = planInternalPathStrict({ lng: user[0], lat: user[1] }, gate);
       if (!insidePlan.coords.length) { toastError('No internal route to exit.'); return stopNavigation(); }
       routeCoords = mergeRouteLegs(routeCoords, insidePlan.coords);
       totalMeters += insidePlan.length;
@@ -650,16 +659,19 @@ async function startNavigationToProperty(property) {
       navigationSteps.push(...road.steps);
 
     } else {
-      // outside -> best gate -> internal to property
       const gate = await chooseBestEntrance({ lng: user[0], lat: user[1] }, property, 'enter');
-      const toGate = await getMapboxDirections(user, [gate.lng, gate.lat]);
-      const legA = clipRouteToDestination(toGate.coordinates, [gate.lng, gate.lat], 6);
+
+      // Build internal first to get the entry projection on network
+      const insidePlan = planInternalPathStrict(gate, property);
+      if (!insidePlan.coords.length) { toastError('No internal route found from gate.'); return stopNavigation(); }
+      const entryProj = insidePlan.coords[0];
+
+      const toGate = await getMapboxDirections(user, entryProj);
+      const legA = clipRouteToDestination(toGate.coordinates, entryProj, 6);
       routeCoords = mergeRouteLegs(routeCoords, legA);
       totalMeters += calculatePathDistance(legA);
       navigationSteps.push(...toGate.steps);
 
-      const insidePlan = planInternalPath(gate, property);
-      if (!insidePlan.coords.length) { toastError('No internal route found from gate.'); return stopNavigation(); }
       const legB = clipRouteToDestination(insidePlan.coords, dest, 6);
       routeCoords = mergeRouteLegs(routeCoords, legB);
       totalMeters += calculatePathDistance(legB);
@@ -680,23 +692,50 @@ async function startNavigationToProperty(property) {
   }
 }
 
+// Build the remaining route starting exactly from the user's projected point
+function routeFromUserProjection(userPt, baseCoords) {
+  if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
+  const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, baseCoords);
+  const out = [projPoint];
+  for (let i = closestIndex + 1; i < baseCoords.length; i++) out.push(baseCoords[i]);
+  return dedupeCoords(out);
+}
+
+// Update existing route source without refitting the map
+function setRouteData(coords) {
+  const src = map.getSource('route');
+  if (src) {
+    src.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+  }
+}
+
 function startNavigationUpdates() {
   if (directionUpdateInterval) clearInterval(directionUpdateInterval);
   directionUpdateInterval = setInterval(() => {
     if (!isTracking || !userLocation || !currentRoute) return;
 
     const userPt = [userLocation.lng, userLocation.lat];
-    const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
 
-    const coords = currentRoute.coordinates;
-    let traveled = 0;
-    for (let i = 0; i < closestIndex; i++) traveled += calculateDistance(coords[i], coords[i + 1]);
-    traveled += calculateDistance(coords[closestIndex], projPoint);
+    // 1) Make the visible route start at the user's projection (follows the marker)
+    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
+    setRouteData(trimmed);
 
-    const total = calculatePathDistance(coords);
+    // 2) Progress metrics
+    const total = calculatePathDistance(currentRoute.coordinates);
+    const remaining = calculatePathDistance(trimmed);
+    const traveled = Math.max(0, total - remaining);
     progressPercentage = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
-    distanceToDestination = total - traveled;
+    distanceToDestination = remaining;
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
+
+    // 3) Light off-route detection -> reroute
+    const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
+    const now = Date.now();
+    if (offDist > OFF_ROUTE_REROUTE_M && now - lastRerouteTs > REROUTE_MIN_MS && selectedProperty) {
+      lastRerouteTs = now;
+      startNavigationToProperty(selectedProperty);
+      return;
+    }
 
     checkProximityNow();
   }, 1000);
@@ -725,9 +764,15 @@ function displayRoute() {
   if (map.getLayer('route')) map.removeLayer('route');
   if (map.getSource('route')) map.removeSource('route');
 
+  // Start the visible line from the user's projection if available
+  const base = currentRoute.coordinates;
+  const startCoords = (userLocation)
+    ? routeFromUserProjection([userLocation.lng, userLocation.lat], base)
+    : base;
+
   map.addSource('route', {
     type: 'geojson',
-    data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: currentRoute.coordinates } }
+    data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: startCoords } }
   });
 
   map.addLayer({
@@ -738,9 +783,12 @@ function displayRoute() {
     paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
   });
 
-  const bounds = new mapboxgl.LngLatBounds();
-  for (const c of currentRoute.coordinates) bounds.extend(c);
-  map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
+  if (!routeBoundsFittedOnce) {
+    const bounds = new mapboxgl.LngLatBounds();
+    for (const c of base) bounds.extend(c);
+    map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
+    routeBoundsFittedOnce = true;
+  }
 }
 
 function completeNavigation() {
@@ -792,14 +840,12 @@ function checkProximityNow() {
   const destPt = getDestinationPoint(); if (!destPt) return;
 
   const straight = calculateDistance(userPt, destPt);
-  let along = Infinity;
 
+  // Use the trimmed (follow-me) route for "along" distance
+  let along = Infinity;
   if (currentRoute?.coordinates?.length) {
-    const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
-    const coords = currentRoute.coordinates;
-    let rem = calculateDistance(projPoint, coords[closestIndex + 1] ?? projPoint);
-    for (let i = closestIndex + 1; i < coords.length - 1; i++) rem += calculateDistance(coords[i], coords[i + 1]);
-    along = rem;
+    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
+    along = calculatePathDistance(trimmed);
   }
 
   const metric = Math.min(straight, along);
@@ -815,16 +861,25 @@ function checkProximityNow() {
 // ================================
 // Internal routing (pure planner + renderer)
 // ================================
+
+// HARD-SNAP joiner: next leg always starts at last point of previous leg.
 function mergeRouteLegs(existing, incoming) {
-  if (!incoming?.length) return existing;
-  if (!existing.length) return [...incoming];
-  const last = existing[existing.length - 1], first = incoming[0];
-  if (!almostEqualCoord(last, first)) existing.push(first);
-  return existing.concat(incoming.slice(1));
+  if (!incoming?.length) return existing ?? [];
+  if (!existing?.length) return incoming.slice();
+
+  const out = existing.slice();
+  const last = out[out.length - 1];
+
+  const inc = incoming.slice();
+  inc[0] = last; // force seam equality
+  for (let i = 1; i < inc.length; i++) {
+    if (!almostEqualCoord(out[out.length - 1], inc[i])) out.push(inc[i]);
+  }
+  return out;
 }
 
-// PURE: compute internal path without side-effects
-function planInternalPath(startPoint, endPoint) {
+// STRICT internal path — stays on the path network only (no block spurs)
+function planInternalPathStrict(startPoint, endPoint) {
   if (!lineStringFeatures?.length) return { coords: [], length: 0 };
 
   let bestStart = null, bestDest = null;
@@ -839,13 +894,10 @@ function planInternalPath(startPoint, endPoint) {
 
   if (bestStart.feature.id === bestDest.feature.id) {
     const C = bestStart.feature.coordinates.slice();
-    const sIdx0 = bestStart.index;
-    const dIdx0 = bestDest.index + (bestDest.index >= sIdx0 ? 1 : 0);
-    C.splice(sIdx0 + 1, 0, bestStart.point);
-    C.splice(dIdx0 + 1, 0, bestDest.point);
-
+    C.splice(bestStart.index + 1, 0, bestStart.point);
+    C.splice(bestDest.index  + 2, 0, bestDest.point);
     const si = nearestRouteIndexOnCoords(bestStart.point, C);
-    const di = nearestRouteIndexOnCoords(bestDest.point, C);
+    const di = nearestRouteIndexOnCoords(bestDest.point,  C);
     chain = si <= di ? C.slice(si, di + 1) : C.slice(di, si + 1).reverse();
 
   } else {
@@ -856,8 +908,12 @@ function planInternalPath(startPoint, endPoint) {
     const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
     const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
 
-    const sNode = sEnds.reduce((a, b) => calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a);
-    const dNode = dEnds.reduce((a, b) => calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a);
+    const sNode = sEnds.reduce((a, b) =>
+      calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a
+    );
+    const dNode = dEnds.reduce((a, b) =>
+      calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a
+    );
 
     const nodePath = dijkstra(edges, nid(sNode), nid(dNode));
     if (!nodePath.length) return { coords: [], length: 0 };
@@ -874,18 +930,13 @@ function planInternalPath(startPoint, endPoint) {
     chain = [bestStart.point, ...sSeg.slice(1), ...nodeChain, ...dSeg.slice(1), bestDest.point];
   }
 
-  const head = [startPoint.lng, startPoint.lat];
-  const tail = [endPoint.lng, endPoint.lat];
-  if (!almostEqualCoord(head, chain[0])) chain = [head, ...chain];
-  if (!almostEqualCoord(chain[chain.length - 1], tail)) chain = [...chain, tail];
-
   chain = dedupeCoords(chain);
   return { coords: chain, length: calculatePathDistance(chain) };
 }
 
-// Renderer variant (uses the pure plan then styles layer)
+// Preview styling only
 async function navigateUsingInternalPaths(endPoint, startPoint) {
-  const plan = planInternalPath(startPoint, endPoint);
+  const plan = planInternalPathStrict(startPoint, endPoint);
   selectedLineString = { id: 'internal', coordinates: plan.coords };
   map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
   map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
@@ -1046,9 +1097,8 @@ function findNearestEntrance(fromPoint = null) {
   return best;
 }
 
-// Best gate by total cost; FIXED logic for 'enter' vs 'exit'
+// Best gate by total cost
 async function chooseBestEntrance(startPoint, property, mode = 'enter') {
-  // preselect top-k straight-line to reduce API calls
   const ranked = ENTRANCES
     .map(g => ({ g, d: calculateDistance([startPoint.lng, startPoint.lat], [g.lng, g.lat]) }))
     .sort((a, b) => a.d - b.d)
@@ -1059,21 +1109,22 @@ async function chooseBestEntrance(startPoint, property, mode = 'enter') {
 
   for (const cand of ranked) {
     const gate = cand.g;
-
-    let outsideMeters = 0;
-    let insideMeters  = 0;
+    let outsideMeters = 0, insideMeters = 0;
 
     if (mode === 'enter') {
-      const road = await getMapboxDirections([startPoint.lng, startPoint.lat], [gate.lng, gate.lat]);
+      const plan = planInternalPathStrict(gate, property);
+      if (!plan.coords.length) continue;
+      const entryProj = plan.coords[0];
+      const road = await getMapboxDirections([startPoint.lng, startPoint.lat], entryProj);
       outsideMeters = calculatePathDistance(road.coordinates);
-      const insidePlan = planInternalPath(gate, property); // gate -> property (inside)
-      insideMeters = insidePlan.length || Infinity;
+      insideMeters  = plan.length;
     } else {
-      // exit: user inside, dest outside
-      const insidePlan = planInternalPath(startPoint, gate); // user -> gate (inside)
-      insideMeters = insidePlan.length || Infinity;
-      const road = await getMapboxDirections([gate.lng, gate.lat], [property.lng, property.lat]);
+      const plan = planInternalPathStrict(startPoint, gate);
+      if (!plan.coords.length) continue;
+      const exitProj = plan.coords[plan.coords.length - 1];
+      const road = await getMapboxDirections(exitProj, [property.lng, property.lat]);
       outsideMeters = calculatePathDistance(road.coordinates);
+      insideMeters  = plan.length;
     }
 
     const cost = insideMeters + outsideMeters;
@@ -1082,8 +1133,7 @@ async function chooseBestEntrance(startPoint, property, mode = 'enter') {
   return bestGate;
 }
 
-// Cut the polyline when the circle around dest (radius m) is reached.
-// Handles hits in the middle of a segment and snaps last point to dest.
+// Cut the polyline when a circle around dest (radius m) is reached.
 function clipRouteToDestination(routeCoords, destPt, radiusM = 8) {
   if (!Array.isArray(routeCoords) || routeCoords.length < 2) return routeCoords ?? [];
   const out = [routeCoords[0]];
@@ -1091,23 +1141,19 @@ function clipRouteToDestination(routeCoords, destPt, radiusM = 8) {
     const a = out[out.length - 1];
     const b = routeCoords[i + 1];
 
-    // if next vertex already within radius, snap and stop
     if (calculateDistance(b, destPt) <= radiusM) {
       out.push(destPt.slice());
       return dedupeCoords(out);
     }
 
-    // check if segment AB passes near the dest: project dest onto AB
     const proj = nearestPointOnSegment(destPt, a, b);
     if (proj.distance <= radiusM) {
-      // cut at projected point and snap to exact dest
       out.push(destPt.slice());
       return dedupeCoords(out);
     }
 
     out.push(b);
   }
-  // if never intersected, force end at dest (prevents tiny tails)
   if (!almostEqualCoord(out[out.length - 1], destPt)) out.push(destPt.slice());
   return dedupeCoords(out);
 }
@@ -1151,7 +1197,7 @@ function toastSuccess(message) {
 }
 function toastError(message) {
   errorMessage = message;
-  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
+  setTimeout(() => { if (errorMessage === message) successMessage = null; }, 5000);
   console.error('[ERR]', message);
 }
 
