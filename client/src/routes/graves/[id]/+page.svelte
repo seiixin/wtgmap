@@ -590,13 +590,11 @@ function stopTracking() {
 // ================================
 const OFF_ROUTE_REROUTE_M = 25;      // user deviates > this => reroute
 const REROUTE_MIN_MS = 8000;
-const ARRIVAL_THRESHOLD_M = 10;      // strict: must be <= 10 m along-route
 const ARRIVAL_CONFIRM_TICKS = 2;     // need N consecutive checks under threshold
 let arrivalStreak = 0;
 
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
-let lastProximityCheckTs = 0;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
