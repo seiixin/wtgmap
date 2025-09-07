@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#ffffff',        // PURE WHITE
+        'fill-color': '#d6bd89',        
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#ffffff' // white outline (invisible against fill)
+        'fill-outline-color': '#d6bd89' 
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -532,10 +532,6 @@ if (map.getLayer('subdivision-blocks-stroke')) {
       await new Promise(r => setTimeout(r, delay));
     }
   }
-
-// ================================
-// Geolocation
-// ================================
 // ================================
 // Geolocation
 // ================================
@@ -594,6 +590,9 @@ function stopTracking() {
 // ================================
 const OFF_ROUTE_REROUTE_M = 25;      // user deviates > this => reroute
 const REROUTE_MIN_MS = 8000;
+const ARRIVAL_CONFIRM_TICKS = 2;     // need N consecutive checks under 10 m
+let arrivalStreak = 0;
+
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
 
@@ -610,6 +609,7 @@ async function startNavigationToProperty(property) {
   isNavigating = true;
   hasNearAlertFired = false;
   hasArrivedOnce = false;
+  arrivalStreak = 0;
   routeBoundsFittedOnce = false;
 
   try {
@@ -757,6 +757,7 @@ function stopNavigation() {
   clearPointSource(DEST_SRC);
   currentRoute = null;
   hasNearAlertFired = false;
+  arrivalStreak = 0;
 }
 
 function displayRoute() {
@@ -818,13 +819,14 @@ function getCurrentStepByDistance(traveled, total, steps = []) {
 }
 
 // ================================
-// Proximity (≤10m arrival)
+// Proximity (≤10m arrival, with confirmation)
 // ================================
 function effectiveNearRadius() {
   const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20;
   const jitter = Math.max(0, acc - 5);
   return Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
 }
+
 function getDestinationPoint() {
   if (selectedProperty?.lng != null && selectedProperty?.lat != null) return [selectedProperty.lng, selectedProperty.lat];
   const src = map.getSource(DEST_SRC);
@@ -832,6 +834,7 @@ function getDestinationPoint() {
   const feat = fc?.features?.[0];
   return feat?.geometry?.type === 'Point' ? feat.geometry.coordinates : null;
 }
+
 function checkProximityNow() {
   if (!userLocation || !isNavigating || hasArrivedOnce) return;
   const now = Date.now(); if (now - lastProximityCheckTs < 250) return; lastProximityCheckTs = now;
@@ -849,13 +852,26 @@ function checkProximityNow() {
   }
 
   const metric = Math.min(straight, along);
+
+  // Near alert (independent of arrival)
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && metric <= near) {
     hasNearAlertFired = true;
     toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
     try { navigator.vibrate?.(120); } catch {}
   }
-  if (metric <= ARRIVAL_THRESHOLD_M) { hasArrivedOnce = true; completeNavigation(); }
+
+  // HARD arrival: must be <= 10 m, and confirmed for a couple of ticks
+  if (metric <= ARRIVAL_THRESHOLD_M) {
+    arrivalStreak++;
+    if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
+      hasArrivedOnce = true;
+      completeNavigation();
+      return;
+    }
+  } else {
+    arrivalStreak = 0;
+  }
 }
 
 // ================================
