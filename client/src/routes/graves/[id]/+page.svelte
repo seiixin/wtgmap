@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#fff', //#a9a9a9       
+        'fill-color': '#a9a9a9',        // 
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#fff' //#a9a9a9
+        'fill-outline-color': '#a9a9a9' // 
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -532,20 +532,49 @@ if (map.getLayer('subdivision-blocks-stroke')) {
       await new Promise(r => setTimeout(r, delay));
     }
   }
-// HALF OF THE SCRIPT
+
+// ===========================================
+// Live-follow Navigation (Mapbox GL JS)
+// ===========================================
+
+// Tunables
+const REROUTE_COOLDOWN_MS = 4000;         // min delay between reroutes
+const OFFROUTE_THRESHOLD_M = 25;          // how far off the polyline before rerouting
+const CAMERA_FOLLOW = true;               // pan to user while navigating
+const CAMERA_MAX_ZOOM = 18;
+
+// State
+let lastRerouteTs = 0;
 
 // ================================
 // Geolocation
 // ================================
 function setUserPin(lng, lat, accuracy) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
+
   userLocation = { lng, lat, accuracy };
-  hasInitialFix = true;
   setPointInSource(USER_SRC, lng, lat, { accuracy });
 
+  // center/follow camera while navigating
+  if (CAMERA_FOLLOW && isNavigating && map) {
+    map.easeTo({
+      center: [lng, lat],
+      zoom: Math.min(map.getZoom() || 16, CAMERA_MAX_ZOOM),
+      duration: 500
+    });
+  }
+
+  // If we were waiting for a fix to start
   if (pendingDestination) {
-    const dest = pendingDestination; pendingDestination = null;
+    const dest = pendingDestination;
+    pendingDestination = null;
     startNavigationToProperty(dest);
+  }
+
+  // On each fix, update rendering & proximity checks
+  if (isNavigating) {
+    updateFollowRendering();   // split traveled/remaining & refresh sources
+    maybeRerouteIfOffPath();   // auto reroute if we strayed
   }
   checkProximityNow();
 }
@@ -555,13 +584,16 @@ function startTracking() {
   if (isTracking) return;
   isTracking = true;
 
-  if (map && isMapLoaded && geolocate) {
+  if (map && geolocate) {
     attachGeoWatch();
     try { geolocate.trigger(); } catch {}
   } else {
     const once = () => {
       map.off('load', once);
-      if (geolocate) { attachGeoWatch(); try { geolocate.trigger(); } catch {} }
+      if (geolocate) {
+        attachGeoWatch();
+        try { geolocate.trigger(); } catch {}
+      }
     };
     map?.on('load', once);
   }
@@ -575,7 +607,7 @@ function attachGeoWatch() {
       console.warn('watchPosition error:', err);
       if (err?.code === 1) toastError('Location permission denied. Enable it in your browser settings.');
     },
-    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
+    { enableHighAccuracy: true, maximumAge: 3000, timeout: 15000 }
   );
 }
 
@@ -588,24 +620,8 @@ function stopTracking() {
 }
 
 // ================================
-// Navigation
+// Navigation (builds a full route once)
 // ================================
-const OFF_ROUTE_REROUTE_M    = 25;   // user deviates > this => reroute
-const REROUTE_MIN_MS         = 8000;
-const STRAIGHT_ARRIVE_M      = 10;   // arrival fires at <= 10 m (straight-line)
-const ARRIVAL_CONFIRM_TICKS  = 1;    // ilang sunod-sunod na checks bago mag-arrive
-
-// Short “bridge” if route head is away from the user marker (visual only)
-const BRIDGE_WHEN_GAP_M      = 20;
-
-// Direct fallback rule: ONLY kapag nasa dulo (edge) at <=86 m AND walang usable route
-const DIRECT_SHORT_RANGE_M   = 86;
-const EDGE_NEAR_M            = 15;   // gaano kalapit sa boundary para masabing “dulo”
-
-let arrivalStreak = 0;
-let lastRerouteTs = 0;
-let routeBoundsFittedOnce = false;
-
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
 
@@ -615,738 +631,678 @@ async function startNavigationToProperty(property) {
     return;
   }
 
-  stopNavigation();
+  // reset nav state
+  stopNavigation(false);
   isNavigating = true;
   hasNearAlertFired = false;
   hasArrivedOnce = false;
-  arrivalStreak = 0;
-  routeBoundsFittedOnce = false;
+  selectedProperty = property;
 
   try {
-    const user = [userLocation.lng, userLocation.lat];
-    const dest = [property.lng, property.lat];
+    const userCoords = [userLocation.lng, userLocation.lat];
+    const targetCoords = [property.lng, property.lat];
 
-    const userInside = pointInPolygon(user, getCemeteryBoundary());
-    const destInside = pointInPolygon(dest, getCemeteryBoundary());
+    const isInside = pointInPolygon(userCoords, getCemeteryBoundary());
+    const isTargetInside = pointInPolygon(targetCoords, getCemeteryBoundary());
 
     let routeCoords = [];
     let navigationSteps = [];
-    let totalMeters = 0;
+    let totalDistance = 0;
 
-    setPointInSource(DEST_SRC, dest[0], dest[1], { name: property.name });
+    setPointInSource(DEST_SRC, targetCoords[0], targetCoords[1], { name: property.name });
 
-    // ---------- CASES ----------
-    if (userInside && destInside) {
-      const plan = planInternalPathStrict({ lng: user[0], lat: user[1] }, property);
-      if (!plan.coords.length) { toastError('No internal route found.'); return stopNavigation(); }
-      const leg = clipRouteToDestination(plan.coords, dest, 6);
-      routeCoords = mergeRouteLegs(routeCoords, leg);
-      totalMeters += calculatePathDistance(leg);
-      navigationSteps.push(...createInternalSteps(leg));
-
-    } else if (!userInside && !destInside) {
-      const road = await getMapboxDirections(user, dest);
-      if (road?.coordinates?.length) {
-        const leg = clipRouteToDestination(road.coordinates, dest, 6);
-        routeCoords = mergeRouteLegs(routeCoords, leg);
-        totalMeters += calculatePathDistance(leg);
-        navigationSteps.push(...road.steps);
+    if (isInside && isTargetInside) {
+      await navigateUsingInternalPaths(property, { lng: userCoords[0], lat: userCoords[1] });
+      if (!selectedLineString?.coordinates?.length) {
+        toastError('No internal route found.');
+        stopNavigation();
+        return;
       }
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
+    } else if (!isInside && !isTargetInside) {
+      const outside = await getMapboxDirections(userCoords, targetCoords);
+      if (outside?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, outside.coordinates);
+        totalDistance += outside.distance;
+        navigationSteps.push(...outside.steps);
+      }
+    } else if (isInside && !isTargetInside) {
+      const exit = findNearestEntrance({ lng: userCoords[0], lat: userCoords[1] });
+      await navigateUsingInternalPaths(exit, { lng: userCoords[0], lat: userCoords[1] });
+      if (!selectedLineString?.coordinates?.length) {
+        toastError('No internal route to exit.');
+        stopNavigation();
+        return;
+      }
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
 
-    } else if (userInside && !destInside) {
-      const gate = await chooseBestEntrance({ lng: user[0], lat: user[1] }, property, 'exit');
-
-      const insidePlan = planInternalPathStrict({ lng: user[0], lat: user[1] }, gate);
-      if (!insidePlan.coords.length) { toastError('No internal route to exit.'); return stopNavigation(); }
-      routeCoords = mergeRouteLegs(routeCoords, insidePlan.coords);
-      totalMeters += insidePlan.length;
-      navigationSteps.push(...createInternalSteps(insidePlan.coords));
-
-      const road = await getMapboxDirections([gate.lng, gate.lat], dest);
-      const legB = clipRouteToDestination(road.coordinates, dest, 6);
-      routeCoords = mergeRouteLegs(routeCoords, legB);
-      totalMeters += calculatePathDistance(legB);
-      navigationSteps.push(...road.steps);
-
+      const outside = await getMapboxDirections([exit.lng, exit.lat], targetCoords);
+      if (outside?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, outside.coordinates);
+        totalDistance += outside.distance;
+        navigationSteps.push(...outside.steps);
+      }
     } else {
-      const gate = await chooseBestEntrance({ lng: user[0], lat: user[1] }, property, 'enter');
-
-      // Build internal first to get the entry projection on network
-      const insidePlan = planInternalPathStrict(gate, property);
-      if (!insidePlan.coords.length) { toastError('No internal route found from gate.'); return stopNavigation(); }
-      const entryProj = insidePlan.coords[0];
-
-      const toGate = await getMapboxDirections(user, entryProj);
-      const legA = clipRouteToDestination(toGate.coordinates, entryProj, 6);
-      routeCoords = mergeRouteLegs(routeCoords, legA);
-      totalMeters += calculatePathDistance(legA);
-      navigationSteps.push(...toGate.steps);
-
-      const legB = clipRouteToDestination(insidePlan.coords, dest, 6);
-      routeCoords = mergeRouteLegs(routeCoords, legB);
-      totalMeters += calculatePathDistance(legB);
-      navigationSteps.push(...createInternalSteps(legB));
+      const entrance = findNearestEntrance({ lng: userCoords[0], lat: userCoords[1] });
+      const toGate = await getMapboxDirections(userCoords, [entrance.lng, entrance.lat]);
+      if (toGate?.coordinates?.length) {
+        routeCoords = mergeRouteLegs(routeCoords, toGate.coordinates);
+        totalDistance += toGate.distance;
+        navigationSteps.push(...toGate.steps);
+      }
+      await navigateUsingInternalPaths(property, entrance);
+      if (!selectedLineString?.coordinates?.length) {
+        toastError('No internal route found from gate.');
+        stopNavigation();
+        return;
+      }
+      routeCoords = mergeRouteLegs(routeCoords, selectedLineString.coordinates);
+      totalDistance += calculatePathDistance(selectedLineString.coordinates);
+      navigationSteps.push(...createInternalSteps(selectedLineString.coordinates));
     }
 
-    // Final guard
-    routeCoords = clipRouteToDestination(dedupeCoords(routeCoords), dest, 6);
-
-    currentRoute = { coordinates: routeCoords, distance: totalMeters, steps: navigationSteps };
-    displayRoute();
-    startNavigationUpdates();
+    currentRoute = { coordinates: dedupeCoords(routeCoords), distance: totalDistance, steps: navigationSteps };
+    prepareFollowLayers();     // add sources/layers (remaining + traveled)
+    updateFollowRendering();   // initial split
+    startNavigationTick();     // start HUD/proximity updater
+    fitBoundsToRoute();
     checkProximityNow();
   } catch (e) {
     console.error('Navigation error', e);
     toastError('Failed to create route.');
-    // Keep navigating so direct fallback (edge + <=86m) can render even without a route
-    currentRoute = null;
-    displayRoute();
-    startNavigationUpdates();
+    stopNavigation();
   }
 }
 
-// Build the remaining route starting exactly from the user's projected point
-function routeFromUserProjection(userPt, baseCoords) {
-  if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, baseCoords);
-  const out = [projPoint];
-  for (let i = closestIndex + 1; i < baseCoords.length; i++) out.push(baseCoords[i]);
-  return dedupeCoords(out);
-}
+// Rebuild the route using current user position (after going off-route)
+async function rerouteToCurrentDestination() {
+  if (!selectedProperty || !userLocation) return;
+  const now = Date.now();
+  if (now - lastRerouteTs < REROUTE_COOLDOWN_MS) return; // throttle
+  lastRerouteTs = now;
 
-// If the visible route is starting far from the user, add a straight bridge (visual only)
-function bridgeUserToVisibleRoute(userPt, visibleCoords, minGapM = BRIDGE_WHEN_GAP_M) {
-  if (!Array.isArray(visibleCoords) || !visibleCoords.length) return visibleCoords ?? [];
-  const head = visibleCoords[0];
-  const gap = calculateDistance(userPt, head);
-  if (!Number.isFinite(gap) || gap < minGapM) return visibleCoords;
-  return dedupeCoords([userPt, ...visibleCoords]);
-}
-
-// ========== Direct fallback rule (ONLY when walang usable route) ==========
-function distanceToPolygonEdges(point, polygon) {
-  let md = Infinity;
-  for (let i = 0; i < polygon.length - 1; i++) {
-    const a = polygon[i], b = polygon[i + 1];
-    const proj = nearestPointOnSegment(point, a, b);
-    md = Math.min(md, proj.distance);
-  }
-  return md;
-}
-function isNearCemeteryEdge(point, threshM = EDGE_NEAR_M) {
-  const d = distanceToPolygonEdges(point, getCemeteryBoundary());
-  return Number.isFinite(d) && d <= threshM;
-}
-function shouldUseDirectShortRange(userPt, destPt) {
-  const d = calculateDistance(userPt, destPt);
-  const hasUsableRoute = Array.isArray(currentRoute?.coordinates) && currentRoute.coordinates.length >= 2;
-  return Number.isFinite(d) && d <= DIRECT_SHORT_RANGE_M && !hasUsableRoute && isNearCemeteryEdge(userPt);
-}
-function directLine(userPt, destPt) {
-  return dedupeCoords([userPt, destPt]);
-}
-
-// Update existing route source without refitting the map
-function setRouteData(coords) {
-  const src = map.getSource('route');
-  if (src) {
-    src.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } });
+  try {
+    const temp = selectedProperty;
+    // keep UI calm—no state wipe animations, just rebuild
+    await startNavigationToProperty({ ...temp });
+    toastSuccess('Rerouting…');
+  } catch (e) {
+    console.error('Reroute failed', e);
   }
 }
 
-// Ensure route layer/source exist, or update if already present
-function ensureRouteLayer(coords) {
-  const data = { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } };
-  if (!map.getSource('route')) {
-    map.addSource('route', { type: 'geojson', data });
-    if (!map.getLayer('route')) {
-      map.addLayer({
-        id: 'route',
-        type: 'line',
-        source: 'route',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
-      });
-    }
-  } else {
-    setRouteData(coords);
-  }
-}
-
-function startNavigationUpdates() {
+function startNavigationTick() {
   if (directionUpdateInterval) clearInterval(directionUpdateInterval);
   directionUpdateInterval = setInterval(() => {
-    if (!isTracking || !userLocation) return;
+    if (!isTracking || !userLocation || !currentRoute) return;
 
     const userPt = [userLocation.lng, userLocation.lat];
-    const destPt = getDestinationPoint(); if (!destPt) return;
+    const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
+    const total = Math.max(1, currentRoute.distance);
+    const traveled = calculatePathDistance(currentRoute.coordinates.slice(0, closestIndex + 1));
 
-    const hasRoute = Array.isArray(currentRoute?.coordinates) && currentRoute.coordinates.length >= 2;
-
-    // DIRECT FALLBACK: only if NO usable route + edge + <=86 m
-    if (!hasRoute && shouldUseDirectShortRange(userPt, destPt)) {
-      const visible = directLine(userPt, destPt);
-      ensureRouteLayer(visible);
-
-      // progress based on straight distance
-      const straight = calculateDistance(userPt, destPt);
-      distanceToDestination = straight;
-      // since walang known total, show decreasing-to-0 behavior
-      progressPercentage = 100 - Math.min(100, (straight / Math.max(1, straight)) * 100);
-      currentStep = 'Continue to destination';
-
-      checkProximityNow();
-      return; // skip off-route detection in direct fallback (no route anyway)
-    }
-
-    // NORMAL MODE: render route and metrics (no direct line if route exists)
-    if (!hasRoute) return; // nothing to show yet
-
-    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
-    const bridged = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
-    ensureRouteLayer(bridged);
-
-    const total = calculatePathDistance(currentRoute.coordinates);
-    const remaining = calculatePathDistance(trimmed);
-    const traveled = Math.max(0, total - remaining);
-    progressPercentage = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
-    distanceToDestination = remaining;
+    progressPercentage = Math.min(100, Math.max(0, (traveled / total) * 100));
+    distanceToDestination = calculateRemainingDistance(closestIndex);
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-    // Light off-route detection -> reroute
-    const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
-    const now = Date.now();
-    if (offDist > OFF_ROUTE_REROUTE_M && now - lastRerouteTs > REROUTE_MIN_MS && selectedProperty) {
-      lastRerouteTs = now;
-      startNavigationToProperty(selectedProperty);
-      return;
-    }
-
+    // keep follow polyline fresh
+    updateFollowRendering();
     checkProximityNow();
   }, 1000);
 }
 
-function stopNavigation() {
+function stopNavigation(clearDest = true) {
   isNavigating = false;
-  if (directionUpdateInterval) { clearInterval(directionUpdateInterval); directionUpdateInterval = null; }
-  if (map?.getLayer('route')) map.removeLayer('route');
-  if (map?.getSource('route')) map.removeSource('route');
-
+  if (directionUpdateInterval) {
+    clearInterval(directionUpdateInterval);
+    directionUpdateInterval = null;
+  }
+  removeFollowLayers();
   if (map?.getLayer('cemetery-paths')) {
     map.setPaintProperty('cemetery-paths', 'line-opacity', 1);
     map.setPaintProperty('cemetery-paths', 'line-color', '#ffffff');
     map.setPaintProperty('cemetery-paths', 'line-width', 3);
     map.setFilter('cemetery-paths', ['==', '$type', 'LineString']);
   }
-
-  clearPointSource(DEST_SRC);
+  if (clearDest) clearPointSource(DEST_SRC);
   currentRoute = null;
   hasNearAlertFired = false;
-  arrivalStreak = 0;
-}
-
-function displayRoute() {
-  // If we have a route: NEVER use direct fallback.
-  if (currentRoute?.coordinates?.length >= 2) {
-    if (map.getLayer('route')) map.removeLayer('route');
-    if (map.getSource('route')) map.removeSource('route');
-
-    const base = currentRoute.coordinates;
-    let startCoords = base;
-
-    if (userLocation) {
-      const userPt = [userLocation.lng, userLocation.lat];
-      const trimmed = routeFromUserProjection(userPt, base);
-      startCoords = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
-    }
-
-    map.addSource('route', {
-      type: 'geojson',
-      data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: startCoords } }
-    });
-
-    map.addLayer({
-      id: 'route',
-      type: 'line',
-      source: 'route',
-      layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
-    });
-
-    if (!routeBoundsFittedOnce) {
-      const bounds = new mapboxgl.LngLatBounds();
-      for (const c of base) bounds.extend(c);
-      map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
-      routeBoundsFittedOnce = true;
-    }
-    return;
-  }
-
-  // No route yet: try direct fallback ONLY if rule passes (edge + <=86m).
-  if (userLocation) {
-    const userPt = [userLocation.lng, userLocation.lat];
-    const destPt = getDestinationPoint();
-    if (destPt && shouldUseDirectShortRange(userPt, destPt)) {
-      const line = directLine(userPt, destPt);
-      ensureRouteLayer(line);
-
-      if (!routeBoundsFittedOnce) {
-        const bounds = new mapboxgl.LngLatBounds();
-        for (const c of line) bounds.extend(c);
-        map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
-        routeBoundsFittedOnce = true;
-      }
-    }
-  }
+  // hasArrivedOnce guarded until a new nav starts.
 }
 
 function completeNavigation() {
-  stopNavigation();
+  stopNavigation(false);
   toastSuccess(`Arrived at ${selectedProperty?.name ?? 'destination'}`);
   showConfirmation({
     title: 'Navigate to Exit?',
     message: 'Do you want directions back to the nearest entrance?',
     confirmText: 'Yes, guide me',
     cancelText: 'No, stay here',
-    onConfirm: () => { showExitPopup = false; window.location.replace('/graves/Main%20Gate'); },
-    onCancel: () => { toastSuccess('Navigation ended. You can exit at your own pace.'); }
+    onConfirm: () => {
+      window.location.replace('/graves/Main%20Gate');
+    },
+    onCancel: () => {
+      toastSuccess('Navigation ended. You can exit at your own pace.');
+    }
   });
 }
 
+// ================================
+// FOLLOW LOGIC (split traveled/remaining)
+// ================================
+function prepareFollowLayers() {
+  // Add/update GeoJSON sources for remaining + traveled
+  const ensureSource = (id) => {
+    if (map.getSource(id)) return;
+    map.addSource(id, { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } } });
+  };
+  ensureSource('route-remaining');
+  ensureSource('route-traveled');
+
+  // Layers
+  if (!map.getLayer('route-remaining')) {
+    map.addLayer({
+      id: 'route-remaining',
+      type: 'line',
+      source: 'route-remaining',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
+    });
+  }
+  if (!map.getLayer('route-traveled')) {
+    map.addLayer({
+      id: 'route-traveled',
+      type: 'line',
+      source: 'route-traveled',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#9ca3af', 'line-width': 4, 'line-opacity': 0.8 }
+    });
+  }
+}
+
+function removeFollowLayers() {
+  ['route-remaining', 'route-traveled'].forEach((id) => {
+    if (map.getLayer(id)) map.removeLayer(id);
+    if (map.getSource(id)) map.removeSource(id);
+  });
+}
+
+function updateFollowRendering() {
+  if (!currentRoute || !userLocation) return;
+
+  const userPt = [userLocation.lng, userLocation.lat];
+
+  // Find closest segment on the route and split there
+  const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
+
+  // Compute exact snapped point on that segment for a smooth split
+  const segA = currentRoute.coordinates[closestIndex];
+  const segB = currentRoute.coordinates[Math.min(closestIndex + 1, currentRoute.coordinates.length - 1)];
+  const snap = nearestPointOnSegment(userPt, segA, segB).point;
+
+  const traveled = [
+    ...currentRoute.coordinates.slice(0, closestIndex + 1),
+    ...(almostEqualCoord(currentRoute.coordinates[closestIndex], snap) ? [] : [snap])
+  ];
+
+  const remaining = [
+    snap,
+    ...currentRoute.coordinates.slice(closestIndex + 1)
+  ];
+
+  // Update sources only (no relayering)
+  const setData = (id, coords) => {
+    const src = map.getSource(id);
+    if (!src) return;
+    src.setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: coords } });
+  };
+
+  setData('route-traveled', dedupeCoords(traveled));
+  setData('route-remaining', dedupeCoords(remaining));
+}
+
+function maybeRerouteIfOffPath() {
+  if (!currentRoute || !userLocation) return;
+
+  const userPt = [userLocation.lng, userLocation.lat];
+  const { distance: off } = nearestDistanceToPolyline(userPt, currentRoute.coordinates);
+
+  if (off > OFFROUTE_THRESHOLD_M) {
+    rerouteToCurrentDestination();
+  }
+}
+
+// Utility: nearest distance to a linestring (in meters)
+function nearestDistanceToPolyline(point, coords) {
+  let min = Infinity;
+  let minIdx = 0;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const n = nearestPointOnSegment(point, coords[i], coords[i + 1]);
+    if (n.distance < min) { min = n.distance; minIdx = i; }
+  }
+  return { distance: min, index: minIdx };
+}
+
+function fitBoundsToRoute() {
+  if (!currentRoute?.coordinates?.length) return;
+  const bounds = new mapboxgl.LngLatBounds();
+  for (const c of currentRoute.coordinates) bounds.extend(c);
+  map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
+}
+
+// ================================
+// Distance/Steps + Proximity (unchanged semantics)
+// ================================
 function calculateRemainingDistance(startIdx) {
-  let d = 0; const coords = currentRoute?.coordinates || [];
+  let d = 0;
+  const coords = currentRoute.coordinates;
   for (let i = startIdx; i < coords.length - 1; i++) d += calculateDistance(coords[i], coords[i + 1]);
   return d;
 }
 
 function getCurrentStepByDistance(traveled, total, steps = []) {
   if (!steps?.length) return 'Continue to destination';
-  let acc = 0;
-  for (const s of steps) { acc += s.distance; if (acc >= traveled) return s.instruction; }
+  let accum = 0, target = traveled;
+  for (const s of steps) {
+    accum += s.distance;
+    if (accum >= target) return s.instruction;
+  }
   return 'Continue to destination';
 }
 
-// ================================
-// Proximity (arrival at ≤10m straight-line)
-// ================================
-const BASE_NEAR_DEFAULT_M = 60; // fallback kung wala ang BASE_NEAR_M global
-function effectiveNearRadius() {
-  const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20;
-  const jitter = Math.max(0, acc - 5);
-  const baseNear = (typeof BASE_NEAR_M === 'number' && isFinite(BASE_NEAR_M)) ? BASE_NEAR_M : BASE_NEAR_DEFAULT_M;
-  return Math.max(40, baseNear - Math.min(40, jitter) * 0.8);
-}
-
 function getDestinationPoint() {
-  if (selectedProperty?.lng != null && selectedProperty?.lat != null) return [selectedProperty.lng, selectedProperty.lat];
+  if (selectedProperty?.lng != null && selectedProperty?.lat != null) {
+    return [selectedProperty.lng, selectedProperty.lat];
+  }
   const src = map.getSource(DEST_SRC);
   const fc = src?.serialize ? src.serialize().data : src?._data || src?.data;
   const feat = fc?.features?.[0];
-  return feat?.geometry?.type === 'Point' ? feat.geometry.coordinates : null;
+  if (feat?.geometry?.type === 'Point') return feat.geometry.coordinates;
+  return null;
+}
+
+function effectiveNearRadius() {
+  const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20;
+  const jitter = Math.max(0, acc - 5);
+  return Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
 }
 
 function checkProximityNow() {
-  if (!userLocation || !isNavigating || hasArrivedOnce) return;
-
+  if (!userLocation || !isNavigating) return;
+  if (hasArrivedOnce) return;
   const now = Date.now();
-  if (now - lastProximityCheckTs < 250) return;
+  if (now - lastProximityCheckTs < 200) return; // debounce
   lastProximityCheckTs = now;
 
   const userPt = [userLocation.lng, userLocation.lat];
-  const destPt = getDestinationPoint(); if (!destPt) return;
+  const destPt = getDestinationPoint();
+  if (!destPt) return;
 
-  // Straight-line distance user -> destination
   const straight = calculateDistance(userPt, destPt);
 
-  // NEAR alert (route-independent)
+  let along = Infinity;
+  if (currentRoute?.coordinates?.length) {
+    const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
+    along = calculateRemainingDistance(closestIndex);
+  }
+
+  const metric = Math.min(straight, along);
+
+  // Near alert
   const near = effectiveNearRadius();
-  if (!hasNearAlertFired && straight <= near) {
+  if (!hasNearAlertFired && metric <= near) {
     hasNearAlertFired = true;
-    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(straight)}m)`);
+    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(metric)}m)`);
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // ARRIVAL: Kapag <= 10 m straight-line
-  if (straight <= STRAIGHT_ARRIVE_M) {
-    arrivalStreak++;
-    if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
-      hasArrivedOnce = true;
-      completeNavigation();
-      return;
+  // Arrival
+  if (metric <= ARRIVAL_THRESHOLD_M) {
+    hasArrivedOnce = true;
+    completeNavigation();
+  }
+}
+  // ================================
+  // Internal routing (unchanged)
+  // ================================
+  function mergeRouteLegs(existing, incoming) {
+    if (!incoming?.length) return existing;
+    if (!existing.length) return [...incoming];
+    const last = existing[existing.length - 1];
+    const firstNew = incoming[0];
+    if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) existing.push(firstNew);
+    return existing.concat(incoming.slice(1));
+  }
+
+  async function navigateUsingInternalPaths(property, startPoint) {
+    if (!lineStringFeatures?.length) throw new Error('No internal paths available');
+
+    let bestStart = null, bestDest = null;
+    for (const f of lineStringFeatures) {
+      const ns = nearestOnLine([startPoint.lng, startPoint.lat], f.coordinates);
+      const nd = nearestOnLine([property.lng, property.lat], f.coordinates);
+      if (!bestStart || ns.distance < bestStart.distance) bestStart = { ...ns, feature: f };
+      if (!bestDest  || nd.distance  < bestDest.distance)  bestDest  = { ...nd, feature: f };
     }
-  } else {
-    arrivalStreak = 0;
-  }
-}
 
-// ================================
-// Internal routing (pure planner + renderer)
-// ================================
+    let chain = [];
 
-// HARD-SNAP joiner: next leg always starts at last point of previous leg.
-function mergeRouteLegs(existing, incoming) {
-  if (!incoming?.length) return existing ?? [];
-  if (!existing?.length) return incoming.slice();
+    if (bestStart.feature.id === bestDest.feature.id) {
+      const C = bestStart.feature.coordinates.slice();
 
-  const out = existing.slice();
-  const last = out[out.length - 1];
+      const sIdx0 = bestStart.index;
+      const dIdx0 = bestDest.index + (bestDest.index >= sIdx0 ? 1 : 0);
+      C.splice(sIdx0 + 1, 0, bestStart.point);
+      C.splice(dIdx0 + 1, 0, bestDest.point);
 
-  const inc = incoming.slice();
-  inc[0] = last; // force seam equality
-  for (let i = 1; i < inc.length; i++) {
-    if (!almostEqualCoord(out[out.length - 1], inc[i])) out.push(inc[i]);
-  }
-  return out;
-}
+      const si = nearestRouteIndexOnCoords(bestStart.point, C);
+      const di = nearestRouteIndexOnCoords(bestDest.point, C);
+      const seg = si <= di ? C.slice(si, di + 1) : C.slice(di, si + 1).reverse();
 
-// STRICT internal path — stays on the path network only (no block spurs)
-function planInternalPathStrict(startPoint, endPoint) {
-  if (!lineStringFeatures?.length) return { coords: [], length: 0 };
+      chain = seg;
+    } else {
+      const { edges, nid } = buildEndpointGraph(lineStringFeatures, 10);
 
-  let bestStart = null, bestDest = null;
-  for (const f of lineStringFeatures) {
-    const ns = nearestOnLine([startPoint.lng, startPoint.lat], f.coordinates);
-    const nd = nearestOnLine([endPoint.lng, endPoint.lat], f.coordinates);
-    if (!bestStart || ns.distance < bestStart.distance) bestStart = { ...ns, feature: f };
-    if (!bestDest  || nd.distance  < bestDest.distance)  bestDest  = { ...nd, feature: f };
-  }
+      const sFeat = bestStart.feature.coordinates;
+      const dFeat = bestDest.feature.coordinates;
+      const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
+      const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
 
-  let chain = [];
+      const sNode = sEnds.reduce((a, b) =>
+        calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a
+      );
+      const dNode = dEnds.reduce((a, b) =>
+        calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a
+      );
 
-  if (bestStart.feature.id === bestDest.feature.id) {
-    const C = bestStart.feature.coordinates.slice();
-    C.splice(bestStart.index + 1, 0, bestStart.point);
-    C.splice(bestDest.index  + 2, 0, bestDest.point);
-    const si = nearestRouteIndexOnCoords(bestStart.point, C);
-    const di = nearestRouteIndexOnCoords(bestDest.point,  C);
-    chain = si <= di ? C.slice(si, di + 1) : C.slice(di, si + 1).reverse();
+      const nodePath = dijkstra(edges, nid(sNode), nid(dNode));
+      if (!nodePath.length) throw new Error('No connecting internal path between segments');
 
-  } else {
-    const { edges, nid } = buildEndpointGraph(lineStringFeatures, 10);
+      const nodeChain = nodePath.map(id => id.split(',').map(Number));
 
-    const sFeat = bestStart.feature.coordinates;
-    const dFeat = bestDest.feature.coordinates;
-    const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
-    const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
+      const sIdx = nearestRouteIndexOnCoords(bestStart.point, sFeat);
+      const sNodeIdx = nearestRouteIndexOnCoords(sNode, sFeat);
+      const sSeg = sIdx <= sNodeIdx ? sFeat.slice(sIdx, sNodeIdx + 1) : sFeat.slice(sNodeIdx, sIdx + 1).reverse();
 
-    const sNode = sEnds.reduce((a, b) =>
-      calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a
-    );
-    const dNode = dEnds.reduce((a, b) =>
-      calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a
-    );
+      const dIdx = nearestRouteIndexOnCoords(bestDest.point, dFeat);
+      const dNodeIdx = nearestRouteIndexOnCoords(dNode, dFeat);
+      const dSeg = dNodeIdx <= dIdx ? dFeat.slice(dNodeIdx, dIdx + 1) : dFeat.slice(dIdx, dNodeIdx + 1).reverse();
 
-    const nodePath = dijkstra(edges, nid(sNode), nid(dNode));
-    if (!nodePath.length) return { coords: [], length: 0 };
-    const nodeChain = nodePath.map(id => id.split(',').map(Number));
+      chain = [bestStart.point, ...sSeg.slice(1), ...nodeChain, ...dSeg.slice(1), bestDest.point];
+    }
 
-    const sIdx = nearestRouteIndexOnCoords(bestStart.point, sFeat);
-    const sNodeIdx = nearestRouteIndexOnCoords(sNode, sFeat);
-    const sSeg = sIdx <= sNodeIdx ? sFeat.slice(sIdx, sNodeIdx + 1) : sFeat.slice(sNodeIdx, sIdx + 1).reverse();
+    const head = [startPoint.lng, startPoint.lat];
+    const tail = [property.lng, property.lat];
 
-    const dIdx = nearestRouteIndexOnCoords(bestDest.point, dFeat);
-    const dNodeIdx = nearestRouteIndexOnCoords(dNode, dFeat);
-    const dSeg = dNodeIdx <= dIdx ? dFeat.slice(dNodeIdx, dIdx + 1) : dFeat.slice(dIdx, dNodeIdx + 1).reverse();
+    if (!almostEqualCoord(head, chain[0])) chain = [head, ...chain];
+    if (!almostEqualCoord(chain[chain.length - 1], tail)) chain = [...chain, tail];
 
-    chain = [bestStart.point, ...sSeg.slice(1), ...nodeChain, ...dSeg.slice(1), bestDest.point];
+    chain = dedupeCoords(chain);
+
+    selectedLineString = { id: 'internal', coordinates: chain };
+
+    map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
+    map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
+    map.setPaintProperty('cemetery-paths', 'line-width', 2);
   }
 
-  chain = dedupeCoords(chain);
-  return { coords: chain, length: calculatePathDistance(chain) };
-}
-
-// Preview styling only
-async function navigateUsingInternalPaths(endPoint, startPoint) {
-  const plan = planInternalPathStrict(startPoint, endPoint);
-  selectedLineString = { id: 'internal', coordinates: plan.coords };
-  map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
-  map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
-  map.setPaintProperty('cemetery-paths', 'line-width', 2);
-}
-
-// ----------------
-function nearestOnLine(point, coords) {
-  let best = { point: coords[0], index: 0, distance: Infinity };
-  for (let i = 0; i < coords.length - 1; i++) {
-    const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
-    if (proj.distance < best.distance) best = { point: proj.point, index: i, distance: proj.distance };
+  function nearestOnLine(point, coords) {
+    let best = { point: coords[0], index: 0, distance: Infinity };
+    for (let i = 0; i < coords.length - 1; i++) {
+      const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
+      if (proj.distance < best.distance) best = { point: proj.point, index: i, distance: proj.distance };
+    }
+    return best;
   }
-  return best;
-}
 
-function calculatePathDistance(coordinates) {
-  if (!Array.isArray(coordinates) || coordinates.length < 2) return 0;
-  let d = 0; for (let i = 0; i < coordinates.length - 1; i++) d += calculateDistance(coordinates[i], coordinates[i + 1]);
-  return d;
-}
+  function calculatePathDistance(coordinates) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) return 0;
+    let d = 0;
+    for (let i = 0; i < coordinates.length - 1; i++) {
+      d += calculateDistance(coordinates[i], coordinates[i + 1]);
+    }
+    return d;
+  }
 
-function createInternalSteps(coordinates) {
-  if (!Array.isArray(coordinates) || coordinates.length < 2) return [];
-  const steps = [];
-  for (let i = 0; i < coordinates.length - 1; i++) {
-    steps.push({
-      instruction: i === 0 ? 'Start on cemetery path'
+  function createInternalSteps(coordinates) {
+    if (!Array.isArray(coordinates) || coordinates.length < 2) return [];
+    const steps = [];
+    for (let i = 0; i < coordinates.length - 1; i++) {
+      steps.push({
+        instruction: i === 0 ? 'Start on cemetery path'
                  : i === coordinates.length - 2 ? 'Arrive at destination'
                  : 'Continue on path',
-      distance: calculateDistance(coordinates[i], coordinates[i + 1]),
-    });
+        distance: calculateDistance(coordinates[i], coordinates[i + 1]),
+      });
+    }
+    return steps;
   }
-  return steps;
-}
 
-function buildEndpointGraph(features, THRESHOLD = 10) {
-  const nodes = [], edges = {};
-  const nid = (c) => `${c[0]},${c[1]}`;
-  const addNode = (c) => { const id = nid(c); if (!edges[id]) { edges[id] = []; nodes.push({ id, coord: c }); } return id; };
-  for (const f of features) {
-    const C = f.coordinates;
-    for (let i = 0; i < C.length; i++) {
-      const a = C[i], aid = addNode(a);
-      if (i < C.length - 1) {
-        const b = C[i + 1], bid = addNode(b);
-        const w = calculateDistance(a, b);
-        edges[aid].push({ to: bid, weight: w });
-        edges[bid].push({ to: aid, weight: w });
+  function buildEndpointGraph(features, THRESHOLD = 10) {
+    const nodes = [];
+    const edges = {};
+    const nid = (c) => `${c[0]},${c[1]}`;
+    const addNode = (c) => {
+      const id = nid(c);
+      if (!edges[id]) { edges[id] = []; nodes.push({ id, coord: c }); }
+      return id;
+    };
+    for (const f of features) {
+      const C = f.coordinates;
+      for (let i = 0; i < C.length; i++) {
+        const a = C[i], aid = addNode(a);
+        if (i < C.length - 1) {
+          const b = C[i + 1], bid = addNode(b);
+          const w = calculateDistance(a, b);
+          edges[aid].push({ to: bid, weight: w });
+          edges[bid].push({ to: aid, weight: w });
+        }
       }
     }
-  }
-  for (let i = 0; i < nodes.length; i++) {
-    for (let j = i + 1; j < nodes.length; j++) {
-      const d = calculateDistance(nodes[i].coord, nodes[j].coord);
-      if (d <= THRESHOLD) {
-        edges[nodes[i].id].push({ to: nodes[j].id, weight: d });
-        edges[nodes[j].id].push({ to: nodes[i].id, weight: d });
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const d = calculateDistance(nodes[i].coord, nodes[j].coord);
+        if (d <= THRESHOLD) {
+          edges[nodes[i].id].push({ to: nodes[j].id, weight: d });
+          edges[nodes[j].id].push({ to: nodes[i].id, weight: d });
+        }
       }
     }
-  }
-  return { nodes, edges, nid };
-}
-
-function dijkstra(edges, startId, endId) {
-  const dist = new Map(), prev = new Map();
-  const Q = new Set(Object.keys(edges));
-  for (const k of Q) dist.set(k, Infinity);
-  dist.set(startId, 0);
-
-  while (Q.size) {
-    let u = null, best = Infinity;
-    for (const k of Q) { const d = dist.get(k); if (d < best) { best = d; u = k; } }
-    if (u === null) break;
-    Q.delete(u);
-    if (u === endId) break;
-
-    for (const e of edges[u]) {
-      const alt = dist.get(u) + e.weight;
-      if (alt < dist.get(e.to)) { dist.set(e.to, alt); prev.set(e.to, u); }
-    }
+    return { nodes, edges, nid };
   }
 
-  const path = [];
-  let cur = endId;
-  if (!prev.has(cur) && cur !== startId) return [];
-  while (cur) { path.push(cur); if (cur === startId) break; cur = prev.get(cur); }
-  return path.reverse();
-}
+  function dijkstra(edges, startId, endId) {
+    const dist = new Map(), prev = new Map();
+    const Q = new Set(Object.keys(edges));
+    for (const k of Q) dist.set(k, Infinity);
+    dist.set(startId, 0);
 
-function nearestRouteIndexOnCoords(pt, coords) {
-  let best = 0, md = Infinity;
-  for (let i = 0; i < coords.length; i++) {
-    const d = calculateDistance(pt, coords[i]);
-    if (d < md) { md = d; best = i; }
-  }
-  return best;
-}
+    while (Q.size) {
+      let u = null, best = Infinity;
+      for (const k of Q) {
+        const d = dist.get(k);
+        if (d < best) { best = d; u = k; }
+      }
+      if (u === null) break;
+      Q.delete(u);
+      if (u === endId) break;
 
-function findClosestPointOnRoute(point, coords) {
-  let closestIndex = 0, minD = Infinity, bestProj = coords[0];
-  for (let i = 0; i < coords.length - 1; i++) {
-    const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
-    if (proj.distance < minD) { minD = proj.distance; closestIndex = i; bestProj = proj.point; }
-  }
-  return { closestIndex, distance: minD, projPoint: bestProj };
-}
-
-// ================================
-// External routing
-// ================================
-async function getMapboxDirections(start, end) {
-  const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
-  const res = await fetch(url);
-  const data = await res.json();
-  if (!data.routes?.length) throw new Error('No route found');
-  const r = data.routes[0];
-  const coords = r.geometry?.coordinates || [];
-  const steps = r.legs?.[0]?.steps?.map((s) => ({
-    instruction: s.maneuver?.instruction ?? 'Continue',
-    distance: s.distance ?? 0
-  })) ?? [];
-  return { coordinates: coords, steps };
-}
-
-// ================================
-/* Helpers */
-// ================================
-function getCemeteryBoundary() {
-  return [
-    [120.975, 14.470],
-    [120.978, 14.470],
-    [120.978, 14.473],
-    [120.975, 14.473],
-    [120.975, 14.470]
-  ];
-}
-function pointInPolygon(point, polygon) {
-  let inside = false;
-  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-    const xi = polygon[i][0], yi = polygon[i][1];
-    const xj = polygon[j][0], yj = polygon[j][1];
-    const intersect = ((yi > point[1]) !== (yj > point[1])) &&
-      (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
-    if (intersect) inside = !inside;
-  }
-  return inside;
-}
-
-// Kept for backwards-compat (unused by chooser)
-function findNearestEntrance(fromPoint = null) {
-  if (!fromPoint) return ENTRANCES[0];
-  let best = ENTRANCES[0], md = Infinity;
-  for (const e of ENTRANCES) {
-    const d = calculateDistance([fromPoint.lng, fromPoint.lat], [e.lng, e.lat]);
-    if (d < md) { md = d; best = e; }
-  }
-  return best;
-}
-
-// Best gate by total cost
-async function chooseBestEntrance(startPoint, property, mode = 'enter') {
-  const ranked = ENTRANCES
-    .map(g => ({ g, d: calculateDistance([startPoint.lng, startPoint.lat], [g.lng, g.lat]) }))
-    .sort((a, b) => a.d - b.d)
-    .slice(0, 4);
-
-  let bestGate = ranked[0]?.g ?? ENTRANCES[0];
-  let bestCost = Infinity;
-
-  for (const cand of ranked) {
-    const gate = cand.g;
-    let outsideMeters = 0, insideMeters = 0;
-
-    if (mode === 'enter') {
-      const plan = planInternalPathStrict(gate, property);
-      if (!plan.coords.length) continue;
-      const entryProj = plan.coords[0];
-      const road = await getMapboxDirections([startPoint.lng, startPoint.lat], entryProj);
-      outsideMeters = calculatePathDistance(road.coordinates);
-      insideMeters  = plan.length;
-    } else {
-      const plan = planInternalPathStrict(startPoint, gate);
-      if (!plan.coords.length) continue;
-      const exitProj = plan.coords[plan.coords.length - 1];
-      const road = await getMapboxDirections(exitProj, [property.lng, property.lat]);
-      outsideMeters = calculatePathDistance(road.coordinates);
-      insideMeters  = plan.length;
+      for (const e of edges[u]) {
+        const alt = dist.get(u) + e.weight;
+        if (alt < dist.get(e.to)) {
+          dist.set(e.to, alt);
+          prev.set(e.to, u);
+        }
+      }
     }
 
-    const cost = insideMeters + outsideMeters;
-    if (isFinite(cost) && cost < bestCost) { bestCost = cost; bestGate = gate; }
-  }
-  return bestGate;
-}
-
-// Cut the polyline when a circle around dest (radius m) is reached.
-function clipRouteToDestination(routeCoords, destPt, radiusM = 8) {
-  if (!Array.isArray(routeCoords) || routeCoords.length < 2) return routeCoords ?? [];
-  const out = [routeCoords[0]];
-  for (let i = 0; i < routeCoords.length - 1; i++) {
-    const a = out[out.length - 1];
-    const b = routeCoords[i + 1];
-
-    if (calculateDistance(b, destPt) <= radiusM) {
-      out.push(destPt.slice());
-      return dedupeCoords(out);
+    const path = [];
+    let cur = endId;
+    if (!prev.has(cur) && cur !== startId) return [];
+    while (cur) {
+      path.push(cur);
+      if (cur === startId) break;
+      cur = prev.get(cur);
     }
+    return path.reverse();
+  }
 
-    const proj = nearestPointOnSegment(destPt, a, b);
-    if (proj.distance <= radiusM) {
-      out.push(destPt.slice());
-      return dedupeCoords(out);
+  function nearestRouteIndexOnCoords(pt, coords) {
+    let best = 0, md = Infinity;
+    for (let i = 0; i < coords.length; i++) {
+      const d = calculateDistance(pt, coords[i]);
+      if (d < md) { md = d; best = i; }
     }
-
-    out.push(b);
+    return best;
   }
-  if (!almostEqualCoord(out[out.length - 1], destPt)) out.push(destPt.slice());
-  return dedupeCoords(out);
-}
 
-function calculateDistance(a, b) {
-  const toRad = (deg) => deg * Math.PI / 180;
-  const [lng1, lat1] = a, [lng2, lat2] = b;
-  const R = 6371e3;
-  const dLat = toRad(lat2 - lat1), dLng = toRad(lng2 - lng1);
-  const la1 = toRad(lat1), la2 = toRad(lat2);
-  const x = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-}
-
-function almostEqualCoord(a, b, epsDeg = 1e-6) {
-  if (!a || !b) return false;
-  return Math.abs(a[0] - b[0]) < epsDeg && Math.abs(a[1] - b[1]) < epsDeg;
-}
-
-function dedupeCoords(arr, epsDeg = 1e-6) {
-  if (!Array.isArray(arr)) return [];
-  const out = [];
-  for (const c of arr) if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) out.push(c);
-  return out;
-}
-
-function nearestPointOnSegment(p, a, b) {
-  const A = p[0] - a[0], B = p[1] - a[1];
-  const C = b[0] - a[0], D = b[1] - a[1];
-  const dot = A * C + B * D, lenSq = C * C + D * D;
-  if (lenSq === 0) return { point: a, distance: calculateDistance(p, a) };
-  let t = dot / lenSq; t = Math.max(0, Math.min(1, t));
-  const proj = [a[0] + t * C, a[1] + t * D];
-  return { point: proj, distance: calculateDistance(p, proj) };
-}
-
-function toastSuccess(message) {
-  successMessage = message;
-  setTimeout(() => { if (successMessage === message) successMessage = null; }, 3000);
-  console.log('[OK]', message);
-}
-function toastError(message) {
-  errorMessage = message;
-  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
-  console.error('[ERR]', message);
-}
-
-function showConfirmation({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
-  showExitPopup = { title, message, confirmText, cancelText, onConfirm, onCancel };
-}
-
-// ================================
-// UI Handlers
-// ================================
-function handleSearchInput(e) {
-  const val = (e?.target?.value ?? '').toString();
-  matchName = val;
-  if (!val.trim()) return;
-  const exact = getFeatureByName(val);
-  if (exact) selectedProperty = exact;
-}
-
-function goNavigate() {
-  if (!selectedProperty) {
-    const p = getFeatureByName(matchName);
-    if (!p) return toastError(`Block "${matchName}" not found.`);
-    selectedProperty = p;
+  function findClosestPointOnRoute(point, coords) {
+    let closestIndex = 0, minD = Infinity;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
+      if (proj.distance < minD) { minD = proj.distance; closestIndex = i; }
+    }
+    return { closestIndex, distance: minD };
   }
-  goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
-  startNavigationToProperty(selectedProperty);
-}
+
+  // ================================
+  // External routing
+  // ================================
+  async function getMapboxDirections(start, end) {
+    const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    if (data.routes?.length) {
+      const r = data.routes[0];
+      return {
+        coordinates: r.geometry.coordinates,
+        distance: r.distance,
+        steps: r.legs?.[0]?.steps?.map((s) => ({
+          instruction: s.maneuver?.instruction ?? 'Continue',
+          distance: s.distance ?? 0
+        })) ?? []
+      };
+    }
+    throw new Error('No route found');
+  }
+
+  // ================================
+  // Helpers
+  // ================================
+  function getCemeteryBoundary() {
+    return [
+      [120.975, 14.470],
+      [120.978, 14.470],
+      [120.978, 14.473],
+      [120.975, 14.473],
+      [120.975, 14.470]
+    ];
+  }
+  function pointInPolygon(point, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const xi = polygon[i][0], yi = polygon[i][1];
+      const xj = polygon[j][0], yj = polygon[j][1];
+      const intersect = ((yi > point[1]) !== (yj > point[1])) &&
+        (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
+      if (intersect) inside = !inside;
+    }
+    return inside;
+  }
+
+  function findNearestEntrance(fromPoint = null) {
+    if (!fromPoint) return ENTRANCES[0];
+    let best = ENTRANCES[0], md = Infinity;
+    for (const e of ENTRANCES) {
+      const d = calculateDistance([fromPoint.lng, fromPoint.lat], [e.lng, e.lat]);
+      if (d < md) { md = d; best = e; }
+    }
+    return best;
+  }
+
+  function calculateDistance(a, b) {
+    const toRad = (deg) => deg * Math.PI / 180;
+    const [lng1, lat1] = a, [lng2, lat2] = b;
+    const R = 6371e3;
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const la1 = toRad(lat1), la2 = toRad(lat2);
+    const x = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+  }
+
+  function almostEqualCoord(a, b, epsDeg = 1e-6) {
+    if (!a || !b) return false;
+    return Math.abs(a[0] - b[0]) < epsDeg && Math.abs(a[1] - b[1]) < epsDeg;
+  }
+
+  function dedupeCoords(arr, epsDeg = 1e-6) {
+    if (!Array.isArray(arr)) return [];
+    const out = [];
+    for (const c of arr) {
+      if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) out.push(c);
+    }
+    return out;
+  }
+
+  function nearestPointOnSegment(p, a, b) {
+    const A = p[0] - a[0];
+    const B = p[1] - a[1];
+    const C = b[0] - a[0];
+    const D = b[1] - a[1];
+
+    const dot = A * C + B * D;
+    const lenSq = C * C + D * D;
+    if (lenSq === 0) return { point: a, distance: calculateDistance(p, a) };
+
+    let t = dot / lenSq;
+    t = Math.max(0, Math.min(1, t));
+
+    const proj = [a[0] + t * C, a[1] + t * D];
+    return { point: proj, distance: calculateDistance(p, proj) };
+  }
+
+  function toastSuccess(message) {
+    successMessage = message;
+    setTimeout(() => { if (successMessage === message) successMessage = null; }, 3000);
+    console.log('[OK]', message);
+  }
+  function toastError(message) {
+    errorMessage = message;
+    setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
+    console.error('[ERR]', message);
+  }
+
+  function showConfirmation({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
+    showExitPopup = { title, message, confirmText, cancelText, onConfirm, onCancel };
+  }
+
+  // ================================
+  // UI Handlers
+  // ================================
+  function handleSearchInput(e) {
+    const val = (e?.target?.value ?? '').toString();
+    matchName = val;
+    if (!val.trim()) return;
+    const exact = getFeatureByName(val);
+    if (exact) selectedProperty = exact;
+  }
+
+  function goNavigate() {
+    if (!selectedProperty) {
+      const p = getFeatureByName(matchName);
+      if (!p) return toastError(`Block "${matchName}" not found.`);
+      selectedProperty = p;
+    }
+    goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
+    startNavigationToProperty(selectedProperty);
+  }
 </script>
+
 
 <!-- ================================
      UI
