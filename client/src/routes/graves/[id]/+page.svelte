@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#d6bd89',        
+        'fill-color': '#a9a9a9',        
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#d6bd89' 
+        'fill-outline-color': '#a9a9a9' 
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -588,11 +588,12 @@ function stopTracking() {
 // ================================
 // Navigation
 // ================================
-const OFF_ROUTE_REROUTE_M = 25;      // user deviates > this => reroute
-const REROUTE_MIN_MS = 8000;
-const ARRIVAL_CONFIRM_TICKS = 2;     // need N consecutive checks under threshold
-let arrivalStreak = 0;
+const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
+const REROUTE_MIN_MS        = 8000;
+const STRAIGHT_ARRIVE_M     = 10;   // strict: must be <= 10 m straight-line
+const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
 
+let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
 
@@ -842,10 +843,10 @@ function checkProximityNow() {
   const userPt = [userLocation.lng, userLocation.lat];
   const destPt = getDestinationPoint(); if (!destPt) return;
 
-  // 1) Straight-line distance (for "near" feel)
+  // 1) Straight-line distance (for sanity)
   const straight = calculateDistance(userPt, destPt);
 
-  // 2) Remaining ALONG the route (for ARRIVAL only)
+  // 2) Remaining ALONG the route (from user’s projection)
   let alongRemaining = Infinity;
   if (currentRoute?.coordinates?.length) {
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
@@ -861,8 +862,8 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // --- ARRIVAL: ONLY when the remaining route <= 10 m (strict) ---
-  if (alongRemaining <= ARRIVAL_THRESHOLD_M) {
+  // --- ARRIVAL: MUST satisfy BOTH along-route and straight-line thresholds ---
+  if (alongRemaining <= ARRIVAL_THRESHOLD_M && straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
       hasArrivedOnce = true;
