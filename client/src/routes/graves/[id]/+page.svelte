@@ -546,6 +546,9 @@ const CAMERA_MAX_ZOOM = 18;
 // State
 let lastRerouteTs = 0;
 
+//HALF OF THE SCRIPT
+
+
 // ================================
 // Geolocation
 // ================================
@@ -1307,44 +1310,139 @@ function checkProximityNow() {
 <!-- ================================
      UI
 ================================== -->
+<svelte:head>
+  <!-- Lock page zoom so pinches go to the map, not the layout.
+       Remove if you prefer dynamic lock/unlock in JS. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+</svelte:head>
+
 <style>
-  .hud { position: absolute; inset: 12px auto auto 12px; z-index: 10; display:flex; gap:.5rem; align-items:center; }
+  :root{
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+  }
+
+  html, body {
+    height: 100%;
+    width: 100%;
+    margin: 0;
+    overscroll-behavior: none;        /* prevent page-level pull-to-refresh/chain */
+    -webkit-text-size-adjust: 100%;   /* avoid iOS auto-zoom on inputs */
+  }
+
+  /* Map fills the real viewport height (accounts for mobile browser bars) */
+  .map {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
+    touch-action: none;               /* gestures handled by Mapbox canvas */
+    overscroll-behavior: contain;     /* keep scroll/zoom inside map */
+    contain: layout size style;
+    background: #eef2ff;
+  }
+
+  /* Mapbox canvas must own touch gestures */
+  :global(.mapboxgl-canvas){
+    touch-action: none !important;
+  }
+
+  /* Common cards/buttons */
   .card { background: #ffffff; border-radius: 12px; padding: .6rem .75rem; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
-  .btn { background: #1d4ed8; color: #fff; border: 0; border-radius: 10px; padding: .55rem .8rem; cursor: pointer; }
+  .btn { background: #1d4ed8; color: #fff; border: 0; border-radius: 10px; padding: .55rem .8rem; cursor: pointer; touch-action: manipulation; }
   .btn:disabled { opacity: .5; cursor: not-allowed; }
-  .toast { position: absolute; right: 12px; top: 12px; z-index: 30; }
-  .map { position: absolute; inset: 0; }
-  .modal-backdrop{ position:fixed; inset:0; background:rgba(0,0,0,.4); display:grid; place-items:center; z-index:50; }
-  .modal{ background:#fff; border-radius:14px; padding:1rem; width:min(92vw,420px); }
+
+  /* Overlays: wrapper ignores pointer events so the map keeps gestures,
+     inner controls re-enable pointer events so they remain clickable */
+  [data-map-overlay]{
+    position: fixed;
+    z-index: 10;
+    pointer-events: none;
+  }
+  [data-map-overlay] *{
+    pointer-events: auto;
+  }
+
+  /* HUD */
+  .hud {
+    inset: calc(var(--safe-top) + 12px) auto auto calc(var(--safe-left) + 12px);
+    display:flex; gap:.5rem; align-items:center;
+  }
+
+  /* Toasts */
+  .toast {
+    position: fixed;
+    right: calc(var(--safe-right) + 12px);
+    top: calc(var(--safe-top) + 12px);
+    z-index: 30;
+    pointer-events: none;   /* clicks fall through unless on inner card */
+  }
+  .toast .card { pointer-events: auto; }
+
+  /* Modal */
+  .modal-backdrop{
+    position:fixed; inset:0;
+    background:rgba(0,0,0,.4);
+    display:grid; place-items:center; z-index:50;
+    padding: max(12px, var(--safe-left)) max(12px, var(--safe-right));
+  }
+  .modal{
+    background:#fff; border-radius:14px; padding:1rem; width:min(92vw,420px);
+  }
+
+  /* Input */
+  .textbox{
+    border:1px solid #e5e7eb; border-radius:8px; padding:.5rem .6rem; min-width:260px;
+    background:#fff;
+  }
+
+  /* Small utility for row layout */
+  .row{ display:flex; gap:.5rem; align-items:center; }
 </style>
 
-<div class="map" bind:this={mapContainer}></div>
+<!-- MAP -->
+<div class="map" id="map" bind:this={mapContainer}></div>
 
-<div class="hud">
-  <div class="card" style="display:flex;gap:.5rem;align-items:center">
-    <input
-      placeholder="Search block / facility"
-      value={matchName}
-      on:input={handleSearchInput}
-      style="border:1px solid #e5e7eb;border-radius:8px;padding:.5rem .6rem;min-width:260px"
-    />
+<!-- HUD (overlay) -->
+<div class="hud" data-map-overlay>
+  <div class="card row">
+  <input
+    class="textbox"
+    placeholder="Search block / facility"
+    bind:value={matchName}
+    on:input={handleSearchInput}
+    inputmode="search"
+    autocomplete="off"
+    autocorrect="off"
+    spellcheck={false}
+  />
+
     <button class="btn" on:click={goNavigate}>Navigate</button>
   </div>
 </div>
 
+<!-- Toasts -->
 {#if successMessage}
-  <div class="toast card" style="color:#065f46;border-left:4px solid #10b981">✅ {successMessage}</div>
+  <div class="toast" aria-live="polite">
+    <div class="card" style="color:#065f46;border-left:4px solid #10b981">✅ {successMessage}</div>
+  </div>
 {/if}
 {#if errorMessage}
-  <div class="toast card" style="color:#991b1b;border-left:4px solid #ef4444">⚠️ {errorMessage}</div>
+  <div class="toast" aria-live="polite">
+    <div class="card" style="color:#991b1b;border-left:4px solid #ef4444">⚠️ {errorMessage}</div>
+  </div>
 {/if}
 
+<!-- Modal -->
 {#if showExitPopup}
-  <div class="modal-backdrop">
+  <div class="modal-backdrop" role="dialog" aria-modal="true" aria-label={showExitPopup.title}>
     <div class="modal">
       <h3 style="margin:0 0 .35rem 0;font-weight:600">{showExitPopup.title}</h3>
       <p style="margin:.25rem 0 .75rem 0; color:#4b5563">{showExitPopup.message}</p>
-      <div style="display:flex;gap:.5rem;justify-content:flex-end">
+      <div class="row" style="justify-content:flex-end">
         <button
           class="card"
           style="background:#f3f4f6;border:1px solid #e5e7eb"
