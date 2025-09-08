@@ -595,6 +595,9 @@ const REROUTE_MIN_MS        = 8000;
 const STRAIGHT_ARRIVE_M     = 10;   // strict: must be <= 10 m straight-line
 const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
 
+// NEW: projection forward window (prevents snapping to far segments that loop back)
+const FORWARD_SEARCH_WINDOW_M = 400; // tweak 200–600 if needed
+
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
@@ -699,10 +702,15 @@ async function startNavigationToProperty(property) {
   }
 }
 
-// Build the remaining route starting exactly from the user's projected point (forward-only)
+// Build the remaining route starting exactly from the user's projected point (forward-only + windowed)
 function routeFromUserProjection(userPt, baseCoords) {
   if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const { idx, projPoint } = projectUserOntoRouteForward(userPt, baseCoords, routeCursorIdx);
+  const { idx, projPoint } = projectUserOntoRouteForward(
+    userPt,
+    baseCoords,
+    routeCursorIdx,
+    FORWARD_SEARCH_WINDOW_M
+  );
 
   // lock in monotonic forward progress
   routeCursorIdx = Math.max(routeCursorIdx, idx);
@@ -712,14 +720,38 @@ function routeFromUserProjection(userPt, baseCoords) {
   return dedupeCoords(out);
 }
 
-// Helper: pick closest segment at or after minIdx
-function projectUserOntoRouteForward(userPt, coords, minIdx = 0) {
-  let best = { idx: Math.max(0, minIdx), projPoint: coords[Math.max(0, minIdx)], dist: Infinity };
-  for (let i = Math.max(0, minIdx); i < coords.length - 1; i++) {
+// Helper: choose the closest segment *after* minIdx within a forward window (in meters)
+function projectUserOntoRouteForward(userPt, coords, minIdx = 0, windowM = 300) {
+  const start = Math.max(0, minIdx);
+  const endExclusive = forwardSearchEndIndex(coords, start, Math.max(10, windowM)); // end index (exclusive)
+  let best = { idx: start, projPoint: coords[start], dist: Infinity };
+
+  for (let i = start; i < endExclusive; i++) {
     const proj = nearestPointOnSegment(userPt, coords[i], coords[i + 1]);
     if (proj.distance < best.dist) best = { idx: i, projPoint: proj.point, dist: proj.distance };
   }
+
+  // Fallback: if nothing improved, still allow closest forward segment in the rest
+  if (!isFinite(best.dist)) {
+    for (let i = start; i < coords.length - 1; i++) {
+      const proj = nearestPointOnSegment(userPt, coords[i], coords[i + 1]);
+      if (proj.distance < best.dist) best = { idx: i, projPoint: proj.point, dist: proj.distance };
+    }
+  }
   return best;
+}
+
+// Compute furthest index reachable within 'meters' walking along the polyline from 'startIdx'
+function forwardSearchEndIndex(coords, startIdx, meters) {
+  let acc = 0;
+  let i = startIdx;
+  for (; i < coords.length - 1; i++) {
+    const seg = calculateDistance(coords[i], coords[i + 1]);
+    acc += seg;
+    if (acc >= meters) break;
+  }
+  // return EXCLUSIVE upper bound usable in for-loops (we will access i and i+1 safely)
+  return Math.min(coords.length - 1, Math.max(startIdx + 1, i + 1));
 }
 
 // Update existing route source without refitting the map
@@ -737,7 +769,7 @@ function startNavigationUpdates() {
 
     const userPt = [userLocation.lng, userLocation.lat];
 
-    // 1) Make the visible route start at the user's projection (follows the marker) — forward-only
+    // 1) Visible route starts at the user's projection (forward-only + windowed)
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
     setRouteData(trimmed);
 
@@ -1272,6 +1304,7 @@ function goNavigate() {
   goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
   startNavigationToProperty(selectedProperty);
 }
+
 
 </script>
 
