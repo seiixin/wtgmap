@@ -549,78 +549,17 @@ let lastRerouteTs = 0;
 //HALF OF THE SCRIPT
 
 
-// ===========================================
-// Camera: avoid strict focus on user
-// ===========================================
-const CAMERA_MODE_KEY = 'ui.cameraMode'; // persist within tab
-// Modes: 'route' (fit to route), 'follow' (optional), 'free' (manual)
-let cameraMode = (sessionStorage.getItem(CAMERA_MODE_KEY) || 'route');
-
-// Soft recenter tunables
-const RECENTER_DEADBAND_PX = 64;          // user must leave this inner pad before pan
-const HEADUP_OFFSET_PX = 120;             // keep user lower on screen when recentering
-const MIN_RECENTER_INTERVAL_MS = 4000;    // throttle soft recenters
-let lastRecenterTs = 0;
-
-function setCameraMode(mode) {
-  cameraMode = mode;
-  try { sessionStorage.setItem(CAMERA_MODE_KEY, mode); } catch {}
-}
-function isFollowingUser() { return cameraMode === 'follow'; }
-
-function hookMapCameraDisengage() {
-  if (!map || map.__cameraHooked) return;
-  const disengage = () => { if (cameraMode === 'follow') setCameraMode('free'); };
-  map.on('dragstart', disengage);
-  map.on('rotatestart', disengage);
-  map.on('pitchstart', disengage);
-  map.on('zoomstart', disengage);
-  map.__cameraHooked = true;
-}
-
-// User visibility helpers
-function userIsInsidePaddedViewport(lng, lat, padPx = RECENTER_DEADBAND_PX) {
-  if (!map) return true;
-  const p = map.project([lng, lat]);
-  const w = map.getContainer().clientWidth;
-  const h = map.getContainer().clientHeight;
-  return (p.x >= padPx && p.x <= (w - padPx) && p.y >= padPx && p.y <= (h - padPx));
-}
-function softRecenterToUser(lng, lat) {
-  if (!map) return;
-  const now = Date.now();
-  if (now - lastRecenterTs < MIN_RECENTER_INTERVAL_MS) return;
-  lastRecenterTs = now;
-
-  // Head-up: position user a bit lower on screen to see more ahead
-  const pt = map.project([lng, lat]);
-  const targetCenterScreen = { x: pt.x, y: pt.y - HEADUP_OFFSET_PX };
-  const targetCenter = map.unproject([targetCenterScreen.x, targetCenterScreen.y]);
-
-  const z = Number.isFinite(map.getZoom?.()) ? map.getZoom() : 16;
-  map.easeTo({ center: targetCenter, zoom: Math.min(z, CAMERA_MAX_ZOOM), duration: 600 });
-}
-
-// ===========================================
-// Geolocation
-// ===========================================
+// ================================
+// Geolocation (no auto-centering)
+// ================================
 function setUserPin(lng, lat, accuracy) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
 
   userLocation = { lng, lat, accuracy };
   setPointInSource(USER_SRC, lng, lat, { accuracy });
 
-  hookMapCameraDisengage();
-
-  // NO strict centering. Only soft-recenter when:
-  // - navigating AND
-  // - camera is in 'follow' OR 'route' mode AND
-  // - user approaches/outside padded viewport edges
-  if (isNavigating && map && (cameraMode === 'follow' || cameraMode === 'route')) {
-    if (!userIsInsidePaddedViewport(lng, lat)) {
-      softRecenterToUser(lng, lat);
-    }
-  }
+  // ⛔ Removed: any map.easeTo / auto-follow.
+  // We do NOT change camera here.
 
   // If we were waiting for a fix to start
   if (pendingDestination) {
@@ -629,7 +568,7 @@ function setUserPin(lng, lat, accuracy) {
     startNavigationToProperty(dest);
   }
 
-  // On each fix, update rendering & proximity checks
+  // On each fix, update rendering & proximity checks (no camera moves)
   if (isNavigating) {
     updateFollowRendering();   // split traveled/remaining & refresh sources
     maybeRerouteIfOffPath();   // auto reroute if we strayed
@@ -642,18 +581,14 @@ function startTracking() {
   if (isTracking) return;
   isTracking = true;
 
-  if (map && geolocate) {
-    hookMapCameraDisengage();
+  // Attach native geolocation watcher only.
+  // ⛔ Removed: geolocate.trigger() to avoid any control-driven camera jumps.
+  if (map) {
     attachGeoWatch();
-    try { geolocate.trigger(); } catch {}
   } else {
     const once = () => {
       map.off('load', once);
-      hookMapCameraDisengage();
-      if (geolocate) {
-        attachGeoWatch();
-        try { geolocate.trigger(); } catch {}
-      }
+      attachGeoWatch();
     };
     map?.on('load', once);
   }
@@ -679,9 +614,9 @@ function stopTracking() {
   isTracking = false;
 }
 
-// ===========================================
+// ================================
 // Navigation (builds a full route once)
-// ===========================================
+// ================================
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
 
@@ -691,15 +626,12 @@ async function startNavigationToProperty(property) {
     return;
   }
 
-  // Reset nav state
+  // reset nav state
   stopNavigation(false);
   isNavigating = true;
   hasNearAlertFired = false;
   hasArrivedOnce = false;
   selectedProperty = property;
-
-  // Start in ROUTE view (not strict follow)
-  setCameraMode('route');
 
   try {
     const userCoords = [userLocation.lng, userLocation.lat];
@@ -771,11 +703,11 @@ async function startNavigationToProperty(property) {
     currentRoute = { coordinates: dedupeCoords(routeCoords), distance: totalDistance, steps: navigationSteps };
     prepareFollowLayers();     // add sources/layers (remaining + traveled)
     updateFollowRendering();   // initial split
+    startNavigationTick();     // start HUD/proximity updater
 
-    // Fit once to the route (route view) and DON'T snap to user each fix
-    fitBoundsToRoute();
+    // ⛔ Removed: fitBoundsToRoute();  -> no auto-zoom or auto-pan at start.
+    // User is free to pan/zoom to see destination.
 
-    startNavigationTick();     // HUD/proximity updater
     checkProximityNow();
   } catch (e) {
     console.error('Navigation error', e);
@@ -793,10 +725,9 @@ async function rerouteToCurrentDestination() {
 
   try {
     const temp = selectedProperty;
+    // rebuild route only (no camera moves)
     await startNavigationToProperty({ ...temp });
     toastSuccess('Rerouting…');
-    // Stay in 'route' mode after reroute
-    setCameraMode('route');
   } catch (e) {
     console.error('Reroute failed', e);
   }
@@ -816,6 +747,7 @@ function startNavigationTick() {
     distanceToDestination = calculateRemainingDistance(closestIndex);
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
+    // keep follow polyline fresh (no camera)
     updateFollowRendering();
     checkProximityNow();
   }, 1000);
@@ -837,9 +769,6 @@ function stopNavigation(clearDest = true) {
   if (clearDest) clearPointSource(DEST_SRC);
   currentRoute = null;
   hasNearAlertFired = false;
-
-  // When nav ends, leave camera in 'free' (no strict follow)
-  setCameraMode('free');
 }
 
 function completeNavigation() {
@@ -851,7 +780,7 @@ function completeNavigation() {
     confirmText: 'Yes, guide me',
     cancelText: 'No, stay here',
     onConfirm: () => {
-      // On the next nav (to gate), we will start in 'route' mode again (not strict follow)
+      // This navigates app page; still no camera auto-focus in this code.
       window.location.replace('/graves/Main%20Gate');
     },
     onCancel: () => {
@@ -860,9 +789,9 @@ function completeNavigation() {
   });
 }
 
-// ===========================================
-// FOLLOW LOGIC (split traveled/remaining) — unchanged
-// ===========================================
+// ================================
+// FOLLOW LOGIC (split traveled/remaining)
+// ================================
 function prepareFollowLayers() {
   const ensureSource = (id) => {
     if (map.getSource(id)) return;
@@ -902,8 +831,11 @@ function updateFollowRendering() {
   if (!currentRoute || !userLocation) return;
 
   const userPt = [userLocation.lng, userLocation.lat];
+
+  // Find closest segment on the route and split there
   const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
 
+  // Compute exact snapped point on that segment for a smooth split
   const segA = currentRoute.coordinates[closestIndex];
   const segB = currentRoute.coordinates[Math.min(closestIndex + 1, currentRoute.coordinates.length - 1)];
   const snap = nearestPointOnSegment(userPt, segA, segB).point;
@@ -918,6 +850,7 @@ function updateFollowRendering() {
     ...currentRoute.coordinates.slice(closestIndex + 1)
   ];
 
+  // Update sources only (no relayering)
   const setData = (id, coords) => {
     const src = map.getSource(id);
     if (!src) return;
@@ -930,13 +863,16 @@ function updateFollowRendering() {
 
 function maybeRerouteIfOffPath() {
   if (!currentRoute || !userLocation) return;
+
   const userPt = [userLocation.lng, userLocation.lat];
   const { distance: off } = nearestDistanceToPolyline(userPt, currentRoute.coordinates);
+
   if (off > OFFROUTE_THRESHOLD_M) {
     rerouteToCurrentDestination();
   }
 }
 
+// Utility: nearest distance to a linestring (in meters)
 function nearestDistanceToPolyline(point, coords) {
   let min = Infinity;
   let minIdx = 0;
@@ -947,16 +883,10 @@ function nearestDistanceToPolyline(point, coords) {
   return { distance: min, index: minIdx };
 }
 
-function fitBoundsToRoute() {
-  if (!currentRoute?.coordinates?.length) return;
-  const bounds = new mapboxgl.LngLatBounds();
-  for (const c of currentRoute.coordinates) bounds.extend(c);
-  map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
-}
 
-// ===========================================
+// ================================
 // Distance/Steps + Proximity (unchanged semantics)
-// ===========================================
+// ================================
 function calculateRemainingDistance(startIdx) {
   let d = 0;
   const coords = currentRoute.coordinates;
@@ -1012,6 +942,7 @@ function checkProximityNow() {
 
   const metric = Math.min(straight, along);
 
+  // Near alert
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && metric <= near) {
     hasNearAlertFired = true;
@@ -1019,15 +950,16 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
+  // Arrival
   if (metric <= ARRIVAL_THRESHOLD_M) {
     hasArrivedOnce = true;
     completeNavigation();
   }
 }
 
-// ===========================================
+// ================================
 // Internal routing (unchanged)
-// ===========================================
+// ================================
 function mergeRouteLegs(existing, incoming) {
   if (!incoming?.length) return existing;
   if (!existing.length) return [...incoming];
@@ -1067,7 +999,7 @@ async function navigateUsingInternalPaths(property, startPoint) {
     const { edges, nid } = buildEndpointGraph(lineStringFeatures, 10);
 
     const sFeat = bestStart.feature.coordinates;
-    const dFeat = bestDest.feature.coordinates;
+    const dFeat = bestDest.feature_coordinates || bestDest.feature.coordinates; // guard
     const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
     const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
 
@@ -1228,9 +1160,9 @@ function findClosestPointOnRoute(point, coords) {
   return { closestIndex, distance: minD };
 }
 
-// ===========================================
+// ================================
 // External routing
-// ===========================================
+// ================================
 async function getMapboxDirections(start, end) {
   const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
   const res = await fetch(url);
@@ -1249,9 +1181,9 @@ async function getMapboxDirections(start, end) {
   throw new Error('No route found');
 }
 
-// ===========================================
-// Helpers (unchanged)
-// ===========================================
+// ================================
+// Helpers
+// ================================
 function getCemeteryBoundary() {
   return [
     [120.975, 14.470],
@@ -1340,9 +1272,9 @@ function showConfirmation({ title, message, confirmText, cancelText, onConfirm, 
   showExitPopup = { title, message, confirmText, cancelText, onConfirm, onCancel };
 }
 
-// ===========================================
-// UI Handlers (unchanged)
-// ===========================================
+// ================================
+// UI Handlers
+// ================================
 function handleSearchInput(e) {
   const val = (e?.target?.value ?? '').toString();
   matchName = val;
