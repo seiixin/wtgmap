@@ -593,7 +593,7 @@ function stopTracking() {
 const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
 const REROUTE_MIN_MS        = 8000;
 const STRAIGHT_ARRIVE_M     = 10;   // strict straight-line arrival
-
+const ARRIVAL_CONFIRM_TICKS = 1;   
 // If the visible route starts far from the user, draw a short straight “bridge”
 const BRIDGE_WHEN_GAP_M     = 20;
 
@@ -903,35 +903,28 @@ function getDestinationPoint() {
 
 function checkProximityNow() {
   if (!userLocation || !isNavigating || hasArrivedOnce) return;
-  const now = Date.now(); if (now - lastProximityCheckTs < 250) return; lastProximityCheckTs = now;
+
+  const now = Date.now();
+  if (now - lastProximityCheckTs < 250) return;
+  lastProximityCheckTs = now;
 
   const userPt = [userLocation.lng, userLocation.lat];
-  const destPt = getDestinationPoint(); if (!destPt) return;
+  const destPt = getDestinationPoint();
+  if (!destPt) return;
 
-  // Straight-line distance
+  // Straight-line distance user -> destination
   const straight = calculateDistance(userPt, destPt);
 
-  // Remaining ALONG the route
-  let alongRemaining = Infinity;
-  if (directShortRangeActive) {
-    // In direct mode, treat remaining as straight to allow arrival
-    alongRemaining = straight;
-  } else if (currentRoute?.coordinates?.length) {
-    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
-    alongRemaining = calculatePathDistance(trimmed);
-  }
-
-  // NEAR alert
-  const nearMetric = Math.min(straight, alongRemaining);
+  // NEAR alert (route-independent para gumana kahit walang route)
   const near = effectiveNearRadius();
-  if (!hasNearAlertFired && nearMetric <= near) {
+  if (!hasNearAlertFired && straight <= near) {
     hasNearAlertFired = true;
-    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(nearMetric)}m)`);
+    toastSuccess(`Malapit ka na sa ${selectedProperty?.name ?? 'destination'} (~${Math.round(straight)}m)`);
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // ARRIVAL: must satisfy BOTH thresholds
-  if (alongRemaining <= ARRIVAL_THRESHOLD_M && straight <= STRAIGHT_ARRIVE_M) {
+  // ARRIVAL: Kapag <= 10m straight-line, agad mag-a-Arrive.
+  if (straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
       hasArrivedOnce = true;
@@ -942,7 +935,6 @@ function checkProximityNow() {
     arrivalStreak = 0;
   }
 }
-
 // ================================
 // Internal routing (pure planner + renderer)
 // ================================
