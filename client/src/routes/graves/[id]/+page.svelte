@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#a9a9a9',        
+        'fill-color': '#F9E4BC',        
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#a9a9a9' 
+        'fill-outline-color': '#F9E4BC' 
       }
     },
     'cemetery-paths' // keep under the path lines
