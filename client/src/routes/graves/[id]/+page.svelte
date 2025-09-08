@@ -532,6 +532,11 @@ if (map.getLayer('subdivision-blocks-stroke')) {
       await new Promise(r => setTimeout(r, delay));
     }
   }
+
+
+//HALF OF THE SCRIPT
+
+
 // ================================
 // Geolocation
 // ================================
@@ -590,7 +595,7 @@ function stopTracking() {
 // ================================
 const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
 const REROUTE_MIN_MS        = 8000;
-const STRAIGHT_ARRIVE_M     = 10;   // strict: must be <= 10 m straight-line
+const STRAIGHT_ARRIVE_M     = 10;   // straight-line must be <= 10 m
 const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
 
 let arrivalStreak = 0;
@@ -693,13 +698,22 @@ async function startNavigationToProperty(property) {
   }
 }
 
-// Build the remaining route starting exactly from the user's projected point
-function routeFromUserProjection(userPt, baseCoords) {
+// Build the remaining route starting from the user's projection.
+// Optionally add a short "stub" from the user point to the route for visuals.
+function routeFromUserProjection(userPt, baseCoords, withStub = true) {
   if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, baseCoords);
-  const out = [projPoint];
-  for (let i = closestIndex + 1; i < baseCoords.length; i++) out.push(baseCoords[i]);
-  return dedupeCoords(out);
+  const { closestIndex, projPoint, distance } = findClosestPointOnRoute(userPt, baseCoords);
+
+  // remainder along the route from the projection
+  const remainder = [projPoint, ...baseCoords.slice(closestIndex + 1)];
+
+  if (!withStub) return dedupeCoords(remainder);
+
+  // Keep the visual stub short to avoid huge lines when far off-route
+  const MAX_STUB_M = OFF_ROUTE_REROUTE_M * 1.2; // ~30m
+  if (distance > MAX_STUB_M) return dedupeCoords(remainder);
+
+  return dedupeCoords([userPt, ...remainder]);
 }
 
 // Update existing route source without refitting the map
@@ -717,19 +731,20 @@ function startNavigationUpdates() {
 
     const userPt = [userLocation.lng, userLocation.lat];
 
-    // 1) Make the visible route start at the user's projection (follows the marker)
-    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
-    setRouteData(trimmed);
+    // 1) Visible route follows the user pin (adds short stub)
+    const visible = routeFromUserProjection(userPt, currentRoute.coordinates, true);
+    setRouteData(visible);
 
-    // 2) Progress metrics
+    // 2) Metrics use the math path (no stub)
+    const mathPath = routeFromUserProjection(userPt, currentRoute.coordinates, false);
     const total = calculatePathDistance(currentRoute.coordinates);
-    const remaining = calculatePathDistance(trimmed);
+    const remaining = calculatePathDistance(mathPath);
     const traveled = Math.max(0, total - remaining);
     progressPercentage = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
     distanceToDestination = remaining;
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-    // 3) Light off-route detection -> reroute
+    // 3) Off-route detection -> reroute
     const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
     const now = Date.now();
     if (offDist > OFF_ROUTE_REROUTE_M && now - lastRerouteTs > REROUTE_MIN_MS && selectedProperty) {
@@ -766,10 +781,10 @@ function displayRoute() {
   if (map.getLayer('route')) map.removeLayer('route');
   if (map.getSource('route')) map.removeSource('route');
 
-  // Start the visible line from the user's projection if available
   const base = currentRoute.coordinates;
+  // Visible version attaches to user pin
   const startCoords = (userLocation)
-    ? routeFromUserProjection([userLocation.lng, userLocation.lat], base)
+    ? routeFromUserProjection([userLocation.lng, userLocation.lat], base, true)
     : base;
 
   map.addSource('route', {
@@ -846,14 +861,14 @@ function checkProximityNow() {
   // 1) Straight-line distance (for sanity)
   const straight = calculateDistance(userPt, destPt);
 
-  // 2) Remaining ALONG the route (from user’s projection)
+  // 2) Remaining ALONG the route (use math path w/o stub)
   let alongRemaining = Infinity;
   if (currentRoute?.coordinates?.length) {
-    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
-    alongRemaining = calculatePathDistance(trimmed);
+    const mathPath = routeFromUserProjection(userPt, currentRoute.coordinates, false);
+    alongRemaining = calculatePathDistance(mathPath);
   }
 
-  // --- NEAR alert: use whichever is smaller so it feels responsive ---
+  // Near alert (use smaller metric to feel responsive)
   const nearMetric = Math.min(straight, alongRemaining);
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && nearMetric <= near) {
@@ -862,7 +877,7 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // --- ARRIVAL: MUST satisfy BOTH along-route and straight-line thresholds ---
+  // ARRIVAL: must satisfy BOTH thresholds, for N consecutive ticks
   if (alongRemaining <= ARRIVAL_THRESHOLD_M && straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
@@ -1214,7 +1229,7 @@ function toastSuccess(message) {
 }
 function toastError(message) {
   errorMessage = message;
-  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
+  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000); // fixed clear
   console.error('[ERR]', message);
 }
 
@@ -1242,6 +1257,7 @@ function goNavigate() {
   goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
   startNavigationToProperty(selectedProperty);
 }
+
 </script>
 
 <!-- ================================
