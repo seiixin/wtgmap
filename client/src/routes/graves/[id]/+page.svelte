@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#a9a9a9', //#a9a9a9       
+        'fill-color': '#fff', //#a9a9a9       
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#a9a9a9' //#a9a9a9
+        'fill-outline-color': '#fff' //#a9a9a9
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -590,22 +590,21 @@ function stopTracking() {
 // ================================
 // Navigation
 // ================================
-const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
-const REROUTE_MIN_MS        = 8000;
-const STRAIGHT_ARRIVE_M     = 10;   // strict straight-line arrival
-const ARRIVAL_CONFIRM_TICKS = 1;   
-// If the visible route starts far from the user, draw a short straight “bridge”
-const BRIDGE_WHEN_GAP_M     = 20;
+const OFF_ROUTE_REROUTE_M    = 25;   // user deviates > this => reroute
+const REROUTE_MIN_MS         = 8000;
+const STRAIGHT_ARRIVE_M      = 10;   // arrival fires at <= 10 m (straight-line)
+const ARRIVAL_CONFIRM_TICKS  = 1;    // ilang sunod-sunod na checks bago mag-arrive
 
-// NEW: If user is within this straight-line distance to destination, draw DIRECT line user->dest
-const DIRECT_SHORT_RANGE_M  = 86;
+// Short “bridge” if route head is away from the user marker (visual only)
+const BRIDGE_WHEN_GAP_M      = 20;
+
+// Direct fallback rule: ONLY kapag nasa dulo (edge) at <=86 m AND walang usable route
+const DIRECT_SHORT_RANGE_M   = 86;
+const EDGE_NEAR_M            = 15;   // gaano kalapit sa boundary para masabing “dulo”
 
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
-
-// Track if we’re currently using the direct short-range line
-let directShortRangeActive = false;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
@@ -622,7 +621,6 @@ async function startNavigationToProperty(property) {
   hasArrivedOnce = false;
   arrivalStreak = 0;
   routeBoundsFittedOnce = false;
-  directShortRangeActive = false;
 
   try {
     const user = [userLocation.lng, userLocation.lat];
@@ -700,7 +698,10 @@ async function startNavigationToProperty(property) {
   } catch (e) {
     console.error('Navigation error', e);
     toastError('Failed to create route.');
-    stopNavigation();
+    // Keep navigating so direct fallback (edge + <=86m) can render even without a route
+    currentRoute = null;
+    displayRoute();
+    startNavigationUpdates();
   }
 }
 
@@ -713,20 +714,33 @@ function routeFromUserProjection(userPt, baseCoords) {
   return dedupeCoords(out);
 }
 
-// If the visible route is starting far from the user, add a straight bridge
+// If the visible route is starting far from the user, add a straight bridge (visual only)
 function bridgeUserToVisibleRoute(userPt, visibleCoords, minGapM = BRIDGE_WHEN_GAP_M) {
   if (!Array.isArray(visibleCoords) || !visibleCoords.length) return visibleCoords ?? [];
   const head = visibleCoords[0];
   const gap = calculateDistance(userPt, head);
   if (!Number.isFinite(gap) || gap < minGapM) return visibleCoords;
-  // Prepend exact user location, making a straight segment from user -> head
   return dedupeCoords([userPt, ...visibleCoords]);
 }
 
-// NEW — decide & draw direct short-range line (<=86m)
+// ========== Direct fallback rule (ONLY when walang usable route) ==========
+function distanceToPolygonEdges(point, polygon) {
+  let md = Infinity;
+  for (let i = 0; i < polygon.length - 1; i++) {
+    const a = polygon[i], b = polygon[i + 1];
+    const proj = nearestPointOnSegment(point, a, b);
+    md = Math.min(md, proj.distance);
+  }
+  return md;
+}
+function isNearCemeteryEdge(point, threshM = EDGE_NEAR_M) {
+  const d = distanceToPolygonEdges(point, getCemeteryBoundary());
+  return Number.isFinite(d) && d <= threshM;
+}
 function shouldUseDirectShortRange(userPt, destPt) {
   const d = calculateDistance(userPt, destPt);
-  return Number.isFinite(d) && d <= DIRECT_SHORT_RANGE_M;
+  const hasUsableRoute = Array.isArray(currentRoute?.coordinates) && currentRoute.coordinates.length >= 2;
+  return Number.isFinite(d) && d <= DIRECT_SHORT_RANGE_M && !hasUsableRoute && isNearCemeteryEdge(userPt);
 }
 function directLine(userPt, destPt) {
   return dedupeCoords([userPt, destPt]);
@@ -740,40 +754,58 @@ function setRouteData(coords) {
   }
 }
 
+// Ensure route layer/source exist, or update if already present
+function ensureRouteLayer(coords) {
+  const data = { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } };
+  if (!map.getSource('route')) {
+    map.addSource('route', { type: 'geojson', data });
+    if (!map.getLayer('route')) {
+      map.addLayer({
+        id: 'route',
+        type: 'line',
+        source: 'route',
+        layout: { 'line-join': 'round', 'line-cap': 'round' },
+        paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
+      });
+    }
+  } else {
+    setRouteData(coords);
+  }
+}
+
 function startNavigationUpdates() {
   if (directionUpdateInterval) clearInterval(directionUpdateInterval);
   directionUpdateInterval = setInterval(() => {
-    if (!isTracking || !userLocation || !currentRoute) return;
+    if (!isTracking || !userLocation) return;
 
     const userPt = [userLocation.lng, userLocation.lat];
     const destPt = getDestinationPoint(); if (!destPt) return;
 
-    // --- Direct short-range mode (<= 86 m): draw exact straight line, suppress reroute ---
-    if (shouldUseDirectShortRange(userPt, destPt)) {
-      directShortRangeActive = true;
+    const hasRoute = Array.isArray(currentRoute?.coordinates) && currentRoute.coordinates.length >= 2;
 
+    // DIRECT FALLBACK: only if NO usable route + edge + <=86 m
+    if (!hasRoute && shouldUseDirectShortRange(userPt, destPt)) {
       const visible = directLine(userPt, destPt);
-      setRouteData(visible);
+      ensureRouteLayer(visible);
 
-      // progress metrics based on straight distance
+      // progress based on straight distance
       const straight = calculateDistance(userPt, destPt);
       distanceToDestination = straight;
-      const denom = Math.max(1, currentRoute?.distance ?? straight);
-      progressPercentage = Math.min(100, Math.max(0, 100 - (straight / denom) * 100));
+      // since walang known total, show decreasing-to-0 behavior
+      progressPercentage = 100 - Math.min(100, (straight / Math.max(1, straight)) * 100);
       currentStep = 'Continue to destination';
 
       checkProximityNow();
-      return; // skip off-route detection while in direct mode
-    } else {
-      directShortRangeActive = false;
+      return; // skip off-route detection in direct fallback (no route anyway)
     }
 
-    // --- Normal mode: project user to route, then bridge if there’s a small gap ---
+    // NORMAL MODE: render route and metrics (no direct line if route exists)
+    if (!hasRoute) return; // nothing to show yet
+
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
     const bridged = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
-    setRouteData(bridged);
+    ensureRouteLayer(bridged);
 
-    // Progress metrics (exclude the small visual bridge)
     const total = calculatePathDistance(currentRoute.coordinates);
     const remaining = calculatePathDistance(trimmed);
     const traveled = Math.max(0, total - remaining);
@@ -811,50 +843,60 @@ function stopNavigation() {
   currentRoute = null;
   hasNearAlertFired = false;
   arrivalStreak = 0;
-  directShortRangeActive = false;
 }
 
 function displayRoute() {
-  if (!currentRoute) return;
-  if (map.getLayer('route')) map.removeLayer('route');
-  if (map.getSource('route')) map.removeSource('route');
+  // If we have a route: NEVER use direct fallback.
+  if (currentRoute?.coordinates?.length >= 2) {
+    if (map.getLayer('route')) map.removeLayer('route');
+    if (map.getSource('route')) map.removeSource('route');
 
-  // Start the visible line: if ≤86m, draw direct; else project+bridge
-  const base = currentRoute.coordinates;
-  let startCoords = base;
+    const base = currentRoute.coordinates;
+    let startCoords = base;
 
-  if (userLocation) {
-    const userPt = [userLocation.lng, userLocation.lat];
-    const destPt = getDestinationPoint() || base[base.length - 1];
-
-    if (shouldUseDirectShortRange(userPt, destPt)) {
-      startCoords = directLine(userPt, destPt);
-      directShortRangeActive = true;
-    } else {
+    if (userLocation) {
+      const userPt = [userLocation.lng, userLocation.lat];
       const trimmed = routeFromUserProjection(userPt, base);
       startCoords = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
-      directShortRangeActive = false;
     }
+
+    map.addSource('route', {
+      type: 'geojson',
+      data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: startCoords } }
+    });
+
+    map.addLayer({
+      id: 'route',
+      type: 'line',
+      source: 'route',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
+    });
+
+    if (!routeBoundsFittedOnce) {
+      const bounds = new mapboxgl.LngLatBounds();
+      for (const c of base) bounds.extend(c);
+      map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
+      routeBoundsFittedOnce = true;
+    }
+    return;
   }
 
-  map.addSource('route', {
-    type: 'geojson',
-    data: { type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: startCoords } }
-  });
+  // No route yet: try direct fallback ONLY if rule passes (edge + <=86m).
+  if (userLocation) {
+    const userPt = [userLocation.lng, userLocation.lat];
+    const destPt = getDestinationPoint();
+    if (destPt && shouldUseDirectShortRange(userPt, destPt)) {
+      const line = directLine(userPt, destPt);
+      ensureRouteLayer(line);
 
-  map.addLayer({
-    id: 'route',
-    type: 'line',
-    source: 'route',
-    layout: { 'line-join': 'round', 'line-cap': 'round' },
-    paint: { 'line-color': '#3b82f6', 'line-width': 6, 'line-opacity': 0.9 }
-  });
-
-  if (!routeBoundsFittedOnce) {
-    const bounds = new mapboxgl.LngLatBounds();
-    for (const c of base) bounds.extend(c);
-    map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
-    routeBoundsFittedOnce = true;
+      if (!routeBoundsFittedOnce) {
+        const bounds = new mapboxgl.LngLatBounds();
+        for (const c of line) bounds.extend(c);
+        map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
+        routeBoundsFittedOnce = true;
+      }
+    }
   }
 }
 
@@ -885,12 +927,14 @@ function getCurrentStepByDistance(traveled, total, steps = []) {
 }
 
 // ================================
-// Proximity (≤10m arrival, with confirmation)
+// Proximity (arrival at ≤10m straight-line)
 // ================================
+const BASE_NEAR_DEFAULT_M = 60; // fallback kung wala ang BASE_NEAR_M global
 function effectiveNearRadius() {
   const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20;
   const jitter = Math.max(0, acc - 5);
-  return Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
+  const baseNear = (typeof BASE_NEAR_M === 'number' && isFinite(BASE_NEAR_M)) ? BASE_NEAR_M : BASE_NEAR_DEFAULT_M;
+  return Math.max(40, baseNear - Math.min(40, jitter) * 0.8);
 }
 
 function getDestinationPoint() {
@@ -909,13 +953,12 @@ function checkProximityNow() {
   lastProximityCheckTs = now;
 
   const userPt = [userLocation.lng, userLocation.lat];
-  const destPt = getDestinationPoint();
-  if (!destPt) return;
+  const destPt = getDestinationPoint(); if (!destPt) return;
 
   // Straight-line distance user -> destination
   const straight = calculateDistance(userPt, destPt);
 
-  // NEAR alert (route-independent para gumana kahit walang route)
+  // NEAR alert (route-independent)
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && straight <= near) {
     hasNearAlertFired = true;
@@ -923,7 +966,7 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // ARRIVAL: Kapag <= 10m straight-line, agad mag-a-Arrive.
+  // ARRIVAL: Kapag <= 10 m straight-line
   if (straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
@@ -935,6 +978,7 @@ function checkProximityNow() {
     arrivalStreak = 0;
   }
 }
+
 // ================================
 // Internal routing (pure planner + renderer)
 // ================================
@@ -1140,7 +1184,7 @@ async function getMapboxDirections(start, end) {
 }
 
 // ================================
-// Helpers
+/* Helpers */
 // ================================
 function getCemeteryBoundary() {
   return [
