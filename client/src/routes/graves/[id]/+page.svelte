@@ -238,9 +238,6 @@ function addCemeterySourcesAndLayers() {
     });
   }
 
-  // --- NEW: subdivision polygon fills (rendered UNDER the white paths)
-  // note: $type returns 'Polygon' for both Polygon and MultiPolygon, so this catches both.
-// --- subdivision polygon fills (PURE WHITE), rendered under the white paths
 if (!map.getLayer('subdivision-blocks-fill')) {
   map.addLayer(
     {
@@ -250,9 +247,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#F9E4BC',        
+        'fill-color': '#950606',        
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#F9E4BC' 
+        'fill-outline-color': '#950606' 
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -593,14 +590,16 @@ function stopTracking() {
 // ================================
 // Navigation
 // ================================
-const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
+const OFF_ROUTE_REROUTE_M   = 25;
 const REROUTE_MIN_MS        = 8000;
+const ARRIVAL_THRESHOLD_M   = 10;   // along-route must be <= 10 m
 const STRAIGHT_ARRIVE_M     = 10;   // straight-line must be <= 10 m
-const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
+const ARRIVAL_CONFIRM_TICKS = 3;    // must pass thresholds N ticks in a row
 
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
+let lastProximityCheckTs = 0;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
@@ -667,7 +666,6 @@ async function startNavigationToProperty(property) {
     } else {
       const gate = await chooseBestEntrance({ lng: user[0], lat: user[1] }, property, 'enter');
 
-      // Build internal first to get the entry projection on network
       const insidePlan = planInternalPathStrict(gate, property);
       if (!insidePlan.coords.length) { toastError('No internal route found from gate.'); return stopNavigation(); }
       const entryProj = insidePlan.coords[0];
@@ -698,22 +696,12 @@ async function startNavigationToProperty(property) {
   }
 }
 
-// Build the remaining route starting from the user's projection.
-// Optionally add a short "stub" from the user point to the route for visuals.
-function routeFromUserProjection(userPt, baseCoords, withStub = true) {
+// Build remaining route starting at the user's projection ONTO the route.
+// No visual stub — we let the line “fly” between pin and path.
+function routeFromUserProjection(userPt, baseCoords) {
   if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const { closestIndex, projPoint, distance } = findClosestPointOnRoute(userPt, baseCoords);
-
-  // remainder along the route from the projection
-  const remainder = [projPoint, ...baseCoords.slice(closestIndex + 1)];
-
-  if (!withStub) return dedupeCoords(remainder);
-
-  // Keep the visual stub short to avoid huge lines when far off-route
-  const MAX_STUB_M = OFF_ROUTE_REROUTE_M * 1.2; // ~30m
-  if (distance > MAX_STUB_M) return dedupeCoords(remainder);
-
-  return dedupeCoords([userPt, ...remainder]);
+  const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, baseCoords);
+  return dedupeCoords([projPoint, ...baseCoords.slice(closestIndex + 1)]);
 }
 
 // Update existing route source without refitting the map
@@ -731,20 +719,19 @@ function startNavigationUpdates() {
 
     const userPt = [userLocation.lng, userLocation.lat];
 
-    // 1) Visible route follows the user pin (adds short stub)
-    const visible = routeFromUserProjection(userPt, currentRoute.coordinates, true);
+    // Visible route starts at the projection (no stub to the pin)
+    const visible = routeFromUserProjection(userPt, currentRoute.coordinates);
     setRouteData(visible);
 
-    // 2) Metrics use the math path (no stub)
-    const mathPath = routeFromUserProjection(userPt, currentRoute.coordinates, false);
+    // Metrics
     const total = calculatePathDistance(currentRoute.coordinates);
-    const remaining = calculatePathDistance(mathPath);
+    const remaining = calculatePathDistance(visible);
     const traveled = Math.max(0, total - remaining);
     progressPercentage = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
     distanceToDestination = remaining;
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-    // 3) Off-route detection -> reroute
+    // Off-route -> reroute
     const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
     const now = Date.now();
     if (offDist > OFF_ROUTE_REROUTE_M && now - lastRerouteTs > REROUTE_MIN_MS && selectedProperty) {
@@ -782,9 +769,8 @@ function displayRoute() {
   if (map.getSource('route')) map.removeSource('route');
 
   const base = currentRoute.coordinates;
-  // Visible version attaches to user pin
   const startCoords = (userLocation)
-    ? routeFromUserProjection([userLocation.lng, userLocation.lat], base, true)
+    ? routeFromUserProjection([userLocation.lng, userLocation.lat], base) // no stub
     : base;
 
   map.addSource('route', {
@@ -840,7 +826,8 @@ function getCurrentStepByDistance(traveled, total, steps = []) {
 function effectiveNearRadius() {
   const acc = Number.isFinite(userLocation?.accuracy) ? userLocation.accuracy : 20;
   const jitter = Math.max(0, acc - 5);
-  return Math.max(40, BASE_NEAR_M - Math.min(40, jitter) * 0.8);
+  const base = (typeof BASE_NEAR_M === 'number' ? BASE_NEAR_M : 60);
+  return Math.max(40, base - Math.min(40, jitter) * 0.8);
 }
 
 function getDestinationPoint() {
@@ -858,17 +845,17 @@ function checkProximityNow() {
   const userPt = [userLocation.lng, userLocation.lat];
   const destPt = getDestinationPoint(); if (!destPt) return;
 
-  // 1) Straight-line distance (for sanity)
+  // Straight-line distance
   const straight = calculateDistance(userPt, destPt);
 
-  // 2) Remaining ALONG the route (use math path w/o stub)
+  // Remaining along the route (projection, no stub)
   let alongRemaining = Infinity;
   if (currentRoute?.coordinates?.length) {
-    const mathPath = routeFromUserProjection(userPt, currentRoute.coordinates, false);
-    alongRemaining = calculatePathDistance(mathPath);
+    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
+    alongRemaining = calculatePathDistance(trimmed);
   }
 
-  // Near alert (use smaller metric to feel responsive)
+  // Near alert
   const nearMetric = Math.min(straight, alongRemaining);
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && nearMetric <= near) {
@@ -877,7 +864,7 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // ARRIVAL: must satisfy BOTH thresholds, for N consecutive ticks
+  // ARRIVAL: BOTH thresholds, confirmed N ticks
   if (alongRemaining <= ARRIVAL_THRESHOLD_M && straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
@@ -1229,7 +1216,7 @@ function toastSuccess(message) {
 }
 function toastError(message) {
   errorMessage = message;
-  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000); // fixed clear
+  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
   console.error('[ERR]', message);
 }
 
