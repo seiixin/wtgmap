@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#fff', //#a9a9a9       
+        'fill-color': '#a9a9a9', //#a9a9a9       
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#fff' //#a9a9a9
+        'fill-outline-color': '#a9a9a9' //#a9a9a9
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -592,15 +592,20 @@ function stopTracking() {
 // ================================
 const OFF_ROUTE_REROUTE_M   = 25;   // user deviates > this => reroute
 const REROUTE_MIN_MS        = 8000;
-const STRAIGHT_ARRIVE_M     = 10;   // strict: must be <= 10 m straight-line
-const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
+const STRAIGHT_ARRIVE_M     = 10;   // strict straight-line arrival
 
-// New: if the visible route starts far from the user, draw a straight bridge
+// If the visible route starts far from the user, draw a short straight “bridge”
 const BRIDGE_WHEN_GAP_M     = 20;
+
+// NEW: If user is within this straight-line distance to destination, draw DIRECT line user->dest
+const DIRECT_SHORT_RANGE_M  = 86;
 
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
+
+// Track if we’re currently using the direct short-range line
+let directShortRangeActive = false;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
@@ -617,6 +622,7 @@ async function startNavigationToProperty(property) {
   hasArrivedOnce = false;
   arrivalStreak = 0;
   routeBoundsFittedOnce = false;
+  directShortRangeActive = false;
 
   try {
     const user = [userLocation.lng, userLocation.lat];
@@ -707,7 +713,7 @@ function routeFromUserProjection(userPt, baseCoords) {
   return dedupeCoords(out);
 }
 
-// NEW: if the visible route is starting far from the user, add a straight bridge
+// If the visible route is starting far from the user, add a straight bridge
 function bridgeUserToVisibleRoute(userPt, visibleCoords, minGapM = BRIDGE_WHEN_GAP_M) {
   if (!Array.isArray(visibleCoords) || !visibleCoords.length) return visibleCoords ?? [];
   const head = visibleCoords[0];
@@ -715,6 +721,15 @@ function bridgeUserToVisibleRoute(userPt, visibleCoords, minGapM = BRIDGE_WHEN_G
   if (!Number.isFinite(gap) || gap < minGapM) return visibleCoords;
   // Prepend exact user location, making a straight segment from user -> head
   return dedupeCoords([userPt, ...visibleCoords]);
+}
+
+// NEW — decide & draw direct short-range line (<=86m)
+function shouldUseDirectShortRange(userPt, destPt) {
+  const d = calculateDistance(userPt, destPt);
+  return Number.isFinite(d) && d <= DIRECT_SHORT_RANGE_M;
+}
+function directLine(userPt, destPt) {
+  return dedupeCoords([userPt, destPt]);
 }
 
 // Update existing route source without refitting the map
@@ -731,13 +746,34 @@ function startNavigationUpdates() {
     if (!isTracking || !userLocation || !currentRoute) return;
 
     const userPt = [userLocation.lng, userLocation.lat];
+    const destPt = getDestinationPoint(); if (!destPt) return;
 
-    // 1) Visible route: start at projection, then bridge from user if there's a gap
+    // --- Direct short-range mode (<= 86 m): draw exact straight line, suppress reroute ---
+    if (shouldUseDirectShortRange(userPt, destPt)) {
+      directShortRangeActive = true;
+
+      const visible = directLine(userPt, destPt);
+      setRouteData(visible);
+
+      // progress metrics based on straight distance
+      const straight = calculateDistance(userPt, destPt);
+      distanceToDestination = straight;
+      const denom = Math.max(1, currentRoute?.distance ?? straight);
+      progressPercentage = Math.min(100, Math.max(0, 100 - (straight / denom) * 100));
+      currentStep = 'Continue to destination';
+
+      checkProximityNow();
+      return; // skip off-route detection while in direct mode
+    } else {
+      directShortRangeActive = false;
+    }
+
+    // --- Normal mode: project user to route, then bridge if there’s a small gap ---
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
     const bridged = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
     setRouteData(bridged);
 
-    // 2) Progress metrics (use 'trimmed' so the visual bridge doesn't inflate distance)
+    // Progress metrics (exclude the small visual bridge)
     const total = calculatePathDistance(currentRoute.coordinates);
     const remaining = calculatePathDistance(trimmed);
     const traveled = Math.max(0, total - remaining);
@@ -745,7 +781,7 @@ function startNavigationUpdates() {
     distanceToDestination = remaining;
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-    // 3) Light off-route detection -> reroute
+    // Light off-route detection -> reroute
     const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
     const now = Date.now();
     if (offDist > OFF_ROUTE_REROUTE_M && now - lastRerouteTs > REROUTE_MIN_MS && selectedProperty) {
@@ -775,6 +811,7 @@ function stopNavigation() {
   currentRoute = null;
   hasNearAlertFired = false;
   arrivalStreak = 0;
+  directShortRangeActive = false;
 }
 
 function displayRoute() {
@@ -782,14 +819,22 @@ function displayRoute() {
   if (map.getLayer('route')) map.removeLayer('route');
   if (map.getSource('route')) map.removeSource('route');
 
-  // Start the visible line from the user's projection; bridge if there's a gap
+  // Start the visible line: if ≤86m, draw direct; else project+bridge
   const base = currentRoute.coordinates;
   let startCoords = base;
 
   if (userLocation) {
     const userPt = [userLocation.lng, userLocation.lat];
-    const trimmed = routeFromUserProjection(userPt, base);
-    startCoords = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
+    const destPt = getDestinationPoint() || base[base.length - 1];
+
+    if (shouldUseDirectShortRange(userPt, destPt)) {
+      startCoords = directLine(userPt, destPt);
+      directShortRangeActive = true;
+    } else {
+      const trimmed = routeFromUserProjection(userPt, base);
+      startCoords = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
+      directShortRangeActive = false;
+    }
   }
 
   map.addSource('route', {
@@ -863,17 +908,20 @@ function checkProximityNow() {
   const userPt = [userLocation.lng, userLocation.lat];
   const destPt = getDestinationPoint(); if (!destPt) return;
 
-  // 1) Straight-line distance (for sanity)
+  // Straight-line distance
   const straight = calculateDistance(userPt, destPt);
 
-  // 2) Remaining ALONG the route (from user’s projection)
+  // Remaining ALONG the route
   let alongRemaining = Infinity;
-  if (currentRoute?.coordinates?.length) {
+  if (directShortRangeActive) {
+    // In direct mode, treat remaining as straight to allow arrival
+    alongRemaining = straight;
+  } else if (currentRoute?.coordinates?.length) {
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
     alongRemaining = calculatePathDistance(trimmed);
   }
 
-  // --- NEAR alert: use whichever is smaller so it feels responsive ---
+  // NEAR alert
   const nearMetric = Math.min(straight, alongRemaining);
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && nearMetric <= near) {
@@ -882,7 +930,7 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // --- ARRIVAL: MUST satisfy BOTH along-route and straight-line thresholds ---
+  // ARRIVAL: must satisfy BOTH thresholds
   if (alongRemaining <= ARRIVAL_THRESHOLD_M && straight <= STRAIGHT_ARRIVE_M) {
     arrivalStreak++;
     if (arrivalStreak >= ARRIVAL_CONFIRM_TICKS) {
@@ -1262,7 +1310,6 @@ function goNavigate() {
   goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
   startNavigationToProperty(selectedProperty);
 }
-
 </script>
 
 <!-- ================================
