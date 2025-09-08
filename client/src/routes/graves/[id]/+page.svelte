@@ -250,9 +250,9 @@ if (!map.getLayer('subdivision-blocks-fill')) {
       'source-layer': 'subdivision-blocks', // adjust if your layer name differs
       filter: ['==', '$type', 'Polygon'],
       paint: {
-        'fill-color': '#a9a9a9',        
+        'fill-color': '#fff', //#a9a9a9       
         'fill-opacity': 1,              // fully opaque
-        'fill-outline-color': '#a9a9a9' 
+        'fill-outline-color': '#fff' //#a9a9a9
       }
     },
     'cemetery-paths' // keep under the path lines
@@ -595,10 +595,8 @@ const REROUTE_MIN_MS        = 8000;
 const STRAIGHT_ARRIVE_M     = 10;   // strict: must be <= 10 m straight-line
 const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under thresholds
 
-// VISUAL FIXES
-const BRIDGE_WHEN_GAP_M               = 20; // kapag malayo ang simula ng route sa user, idugtong ng direct segment
-const FORCE_STRAIGHT_WHEN_SHORT_M     = 65; // kapag sobrang lapit na, straight line user→dest
-const FORCE_STRAIGHT_RATIO            = 1.6; // kapag along-route >> straight-line, straight na lang i-display
+// New: if the visible route starts far from the user, draw a straight bridge
+const BRIDGE_WHEN_GAP_M     = 20;
 
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
@@ -709,34 +707,14 @@ function routeFromUserProjection(userPt, baseCoords) {
   return dedupeCoords(out);
 }
 
-// Bridge the gap between user → start of visible route if malayo ang layo
+// NEW: if the visible route is starting far from the user, add a straight bridge
 function bridgeUserToVisibleRoute(userPt, visibleCoords, minGapM = BRIDGE_WHEN_GAP_M) {
   if (!Array.isArray(visibleCoords) || !visibleCoords.length) return visibleCoords ?? [];
   const head = visibleCoords[0];
   const gap = calculateDistance(userPt, head);
   if (!Number.isFinite(gap) || gap < minGapM) return visibleCoords;
+  // Prepend exact user location, making a straight segment from user -> head
   return dedupeCoords([userPt, ...visibleCoords]);
-}
-
-// Decide what to draw: straight (user→dest) OR bridged trimmed route
-function makeDisplayPolyline(userPt, baseCoords) {
-  if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const destPt = getDestinationPoint();
-  const trimmed = routeFromUserProjection(userPt, baseCoords);
-  const bridged = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
-
-  if (!destPt) return bridged;
-
-  const straight = calculateDistance(userPt, destPt);
-  const along    = calculatePathDistance(trimmed);
-
-  if (straight <= FORCE_STRAIGHT_WHEN_SHORT_M) {
-    return dedupeCoords([userPt, destPt]);
-  }
-  if (Number.isFinite(along) && along > straight * FORCE_STRAIGHT_RATIO) {
-    return dedupeCoords([userPt, destPt]);
-  }
-  return bridged;
 }
 
 // Update existing route source without refitting the map
@@ -754,18 +732,18 @@ function startNavigationUpdates() {
 
     const userPt = [userLocation.lng, userLocation.lat];
 
-    // 1) What to display (may be straight or bridged)
-    const displayCoords = makeDisplayPolyline(userPt, currentRoute.coordinates);
-    setRouteData(displayCoords);
+    // 1) Visible route: start at projection, then bridge from user if there's a gap
+    const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
+    const bridged = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
+    setRouteData(bridged);
 
-    // 2) Progress metrics (use trimmed only, HINDI yung straight/bridge)
-    const trimmed   = routeFromUserProjection(userPt, currentRoute.coordinates);
-    const total     = calculatePathDistance(currentRoute.coordinates);
+    // 2) Progress metrics (use 'trimmed' so the visual bridge doesn't inflate distance)
+    const total = calculatePathDistance(currentRoute.coordinates);
     const remaining = calculatePathDistance(trimmed);
-    const traveled  = Math.max(0, total - remaining);
-    progressPercentage    = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
+    const traveled = Math.max(0, total - remaining);
+    progressPercentage = Math.min(100, Math.max(0, (traveled / Math.max(1, total)) * 100));
     distanceToDestination = remaining;
-    currentStep           = getCurrentStepByDistance(traveled, total, currentRoute.steps);
+    currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
     // 3) Light off-route detection -> reroute
     const { distance: offDist } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
@@ -804,10 +782,15 @@ function displayRoute() {
   if (map.getLayer('route')) map.removeLayer('route');
   if (map.getSource('route')) map.removeSource('route');
 
+  // Start the visible line from the user's projection; bridge if there's a gap
   const base = currentRoute.coordinates;
-  const startCoords = (userLocation)
-    ? makeDisplayPolyline([userLocation.lng, userLocation.lat], base)
-    : base;
+  let startCoords = base;
+
+  if (userLocation) {
+    const userPt = [userLocation.lng, userLocation.lat];
+    const trimmed = routeFromUserProjection(userPt, base);
+    startCoords = bridgeUserToVisibleRoute(userPt, trimmed, BRIDGE_WHEN_GAP_M);
+  }
 
   map.addSource('route', {
     type: 'geojson',
@@ -915,6 +898,8 @@ function checkProximityNow() {
 // ================================
 // Internal routing (pure planner + renderer)
 // ================================
+
+// HARD-SNAP joiner: next leg always starts at last point of previous leg.
 function mergeRouteLegs(existing, incoming) {
   if (!incoming?.length) return existing ?? [];
   if (!existing?.length) return incoming.slice();
@@ -930,6 +915,7 @@ function mergeRouteLegs(existing, incoming) {
   return out;
 }
 
+// STRICT internal path — stays on the path network only (no block spurs)
 function planInternalPathStrict(startPoint, endPoint) {
   if (!lineStringFeatures?.length) return { coords: [], length: 0 };
 
@@ -985,6 +971,7 @@ function planInternalPathStrict(startPoint, endPoint) {
   return { coords: chain, length: calculatePathDistance(chain) };
 }
 
+// Preview styling only
 async function navigateUsingInternalPaths(endPoint, startPoint) {
   const plan = planInternalPathStrict(startPoint, endPoint);
   selectedLineString = { id: 'internal', coordinates: plan.coords };
@@ -993,6 +980,7 @@ async function navigateUsingInternalPaths(endPoint, startPoint) {
   map.setPaintProperty('cemetery-paths', 'line-width', 2);
 }
 
+// ----------------
 function nearestOnLine(point, coords) {
   let best = { point: coords[0], index: 0, distance: Infinity };
   for (let i = 0; i < coords.length - 1; i++) {
@@ -1014,8 +1002,8 @@ function createInternalSteps(coordinates) {
   for (let i = 0; i < coordinates.length - 1; i++) {
     steps.push({
       instruction: i === 0 ? 'Start on cemetery path'
-               : i === coordinates.length - 2 ? 'Arrive at destination'
-               : 'Continue on path',
+                 : i === coordinates.length - 2 ? 'Arrive at destination'
+                 : 'Continue on path',
       distance: calculateDistance(coordinates[i], coordinates[i + 1]),
     });
   }
@@ -1026,7 +1014,6 @@ function buildEndpointGraph(features, THRESHOLD = 10) {
   const nodes = [], edges = {};
   const nid = (c) => `${c[0]},${c[1]}`;
   const addNode = (c) => { const id = nid(c); if (!edges[id]) { edges[id] = []; nodes.push({ id, coord: c }); } return id; };
-
   for (const f of features) {
     const C = f.coordinates;
     for (let i = 0; i < C.length; i++) {
@@ -1039,7 +1026,6 @@ function buildEndpointGraph(features, THRESHOLD = 10) {
       }
     }
   }
-
   for (let i = 0; i < nodes.length; i++) {
     for (let j = i + 1; j < nodes.length; j++) {
       const d = calculateDistance(nodes[i].coord, nodes[j].coord);
