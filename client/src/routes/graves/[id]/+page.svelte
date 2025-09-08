@@ -532,6 +532,8 @@ if (map.getLayer('subdivision-blocks-stroke')) {
       await new Promise(r => setTimeout(r, delay));
     }
   }
+// HALF OF THE SCRIPT
+
 // ================================
 // Geolocation
 // ================================
@@ -596,6 +598,9 @@ const ARRIVAL_CONFIRM_TICKS = 3;    // need N consecutive checks under threshold
 let arrivalStreak = 0;
 let lastRerouteTs = 0;
 let routeBoundsFittedOnce = false;
+
+// NEW: track forward progress along the route so we never "rewind"
+let routeCursorIdx = 0;
 
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
@@ -683,6 +688,7 @@ async function startNavigationToProperty(property) {
     routeCoords = clipRouteToDestination(dedupeCoords(routeCoords), dest, 6);
 
     currentRoute = { coordinates: routeCoords, distance: totalMeters, steps: navigationSteps };
+    routeCursorIdx = 0; // reset forward-progress cursor whenever we create a route
     displayRoute();
     startNavigationUpdates();
     checkProximityNow();
@@ -693,13 +699,27 @@ async function startNavigationToProperty(property) {
   }
 }
 
-// Build the remaining route starting exactly from the user's projected point
+// Build the remaining route starting exactly from the user's projected point (forward-only)
 function routeFromUserProjection(userPt, baseCoords) {
   if (!Array.isArray(baseCoords) || baseCoords.length < 2) return baseCoords ?? [];
-  const { closestIndex, projPoint } = findClosestPointOnRoute(userPt, baseCoords);
+  const { idx, projPoint } = projectUserOntoRouteForward(userPt, baseCoords, routeCursorIdx);
+
+  // lock in monotonic forward progress
+  routeCursorIdx = Math.max(routeCursorIdx, idx);
+
   const out = [projPoint];
-  for (let i = closestIndex + 1; i < baseCoords.length; i++) out.push(baseCoords[i]);
+  for (let i = idx + 1; i < baseCoords.length; i++) out.push(baseCoords[i]);
   return dedupeCoords(out);
+}
+
+// Helper: pick closest segment at or after minIdx
+function projectUserOntoRouteForward(userPt, coords, minIdx = 0) {
+  let best = { idx: Math.max(0, minIdx), projPoint: coords[Math.max(0, minIdx)], dist: Infinity };
+  for (let i = Math.max(0, minIdx); i < coords.length - 1; i++) {
+    const proj = nearestPointOnSegment(userPt, coords[i], coords[i + 1]);
+    if (proj.distance < best.dist) best = { idx: i, projPoint: proj.point, dist: proj.distance };
+  }
+  return best;
 }
 
 // Update existing route source without refitting the map
@@ -717,7 +737,7 @@ function startNavigationUpdates() {
 
     const userPt = [userLocation.lng, userLocation.lat];
 
-    // 1) Make the visible route start at the user's projection (follows the marker)
+    // 1) Make the visible route start at the user's projection (follows the marker) — forward-only
     const trimmed = routeFromUserProjection(userPt, currentRoute.coordinates);
     setRouteData(trimmed);
 
@@ -766,7 +786,7 @@ function displayRoute() {
   if (map.getLayer('route')) map.removeLayer('route');
   if (map.getSource('route')) map.removeSource('route');
 
-  // Start the visible line from the user's projection if available
+  // Start the visible line from the user's projection if available (uses forward-only trim)
   const base = currentRoute.coordinates;
   const startCoords = (userLocation)
     ? routeFromUserProjection([userLocation.lng, userLocation.lat], base)
@@ -1150,27 +1170,37 @@ async function chooseBestEntrance(startPoint, property, mode = 'enter') {
   return bestGate;
 }
 
-// Cut the polyline when a circle around dest (radius m) is reached.
+// Cut the polyline at the *last* time the route touches/enters the destination circle.
 function clipRouteToDestination(routeCoords, destPt, radiusM = 8) {
   if (!Array.isArray(routeCoords) || routeCoords.length < 2) return routeCoords ?? [];
-  const out = [routeCoords[0]];
+
+  let lastHit = null; // { i: indexAfterHit, point: projOrVertex }
+
   for (let i = 0; i < routeCoords.length - 1; i++) {
-    const a = out[out.length - 1];
+    const a = routeCoords[i];
     const b = routeCoords[i + 1];
 
+    // If the next vertex is already within the circle
     if (calculateDistance(b, destPt) <= radiusM) {
-      out.push(destPt.slice());
-      return dedupeCoords(out);
+      lastHit = { i: i + 1, point: b };
     }
 
+    // If the segment crosses/touches the circle boundary (by projection)
     const proj = nearestPointOnSegment(destPt, a, b);
     if (proj.distance <= radiusM) {
-      out.push(destPt.slice());
-      return dedupeCoords(out);
+      lastHit = { i: i + 1, point: proj.point };
     }
-
-    out.push(b);
   }
+
+  let out;
+  if (lastHit) {
+    out = routeCoords.slice(0, lastHit.i);
+    out.push(destPt.slice());
+    return dedupeCoords(out);
+  }
+
+  // No intersection along the way — ensure we end at dest
+  out = routeCoords.slice();
   if (!almostEqualCoord(out[out.length - 1], destPt)) out.push(destPt.slice());
   return dedupeCoords(out);
 }
@@ -1242,6 +1272,7 @@ function goNavigate() {
   goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
   startNavigationToProperty(selectedProperty);
 }
+
 </script>
 
 <!-- ================================
