@@ -549,22 +549,77 @@ let lastRerouteTs = 0;
 //HALF OF THE SCRIPT
 
 
-// ================================
+// ===========================================
+// Camera: avoid strict focus on user
+// ===========================================
+const CAMERA_MODE_KEY = 'ui.cameraMode'; // persist within tab
+// Modes: 'route' (fit to route), 'follow' (optional), 'free' (manual)
+let cameraMode = (sessionStorage.getItem(CAMERA_MODE_KEY) || 'route');
+
+// Soft recenter tunables
+const RECENTER_DEADBAND_PX = 64;          // user must leave this inner pad before pan
+const HEADUP_OFFSET_PX = 120;             // keep user lower on screen when recentering
+const MIN_RECENTER_INTERVAL_MS = 4000;    // throttle soft recenters
+let lastRecenterTs = 0;
+
+function setCameraMode(mode) {
+  cameraMode = mode;
+  try { sessionStorage.setItem(CAMERA_MODE_KEY, mode); } catch {}
+}
+function isFollowingUser() { return cameraMode === 'follow'; }
+
+function hookMapCameraDisengage() {
+  if (!map || map.__cameraHooked) return;
+  const disengage = () => { if (cameraMode === 'follow') setCameraMode('free'); };
+  map.on('dragstart', disengage);
+  map.on('rotatestart', disengage);
+  map.on('pitchstart', disengage);
+  map.on('zoomstart', disengage);
+  map.__cameraHooked = true;
+}
+
+// User visibility helpers
+function userIsInsidePaddedViewport(lng, lat, padPx = RECENTER_DEADBAND_PX) {
+  if (!map) return true;
+  const p = map.project([lng, lat]);
+  const w = map.getContainer().clientWidth;
+  const h = map.getContainer().clientHeight;
+  return (p.x >= padPx && p.x <= (w - padPx) && p.y >= padPx && p.y <= (h - padPx));
+}
+function softRecenterToUser(lng, lat) {
+  if (!map) return;
+  const now = Date.now();
+  if (now - lastRecenterTs < MIN_RECENTER_INTERVAL_MS) return;
+  lastRecenterTs = now;
+
+  // Head-up: position user a bit lower on screen to see more ahead
+  const pt = map.project([lng, lat]);
+  const targetCenterScreen = { x: pt.x, y: pt.y - HEADUP_OFFSET_PX };
+  const targetCenter = map.unproject([targetCenterScreen.x, targetCenterScreen.y]);
+
+  const z = Number.isFinite(map.getZoom?.()) ? map.getZoom() : 16;
+  map.easeTo({ center: targetCenter, zoom: Math.min(z, CAMERA_MAX_ZOOM), duration: 600 });
+}
+
+// ===========================================
 // Geolocation
-// ================================
+// ===========================================
 function setUserPin(lng, lat, accuracy) {
   if (!Number.isFinite(lng) || !Number.isFinite(lat)) return;
 
   userLocation = { lng, lat, accuracy };
   setPointInSource(USER_SRC, lng, lat, { accuracy });
 
-  // center/follow camera while navigating
-  if (CAMERA_FOLLOW && isNavigating && map) {
-    map.easeTo({
-      center: [lng, lat],
-      zoom: Math.min(map.getZoom() || 16, CAMERA_MAX_ZOOM),
-      duration: 500
-    });
+  hookMapCameraDisengage();
+
+  // NO strict centering. Only soft-recenter when:
+  // - navigating AND
+  // - camera is in 'follow' OR 'route' mode AND
+  // - user approaches/outside padded viewport edges
+  if (isNavigating && map && (cameraMode === 'follow' || cameraMode === 'route')) {
+    if (!userIsInsidePaddedViewport(lng, lat)) {
+      softRecenterToUser(lng, lat);
+    }
   }
 
   // If we were waiting for a fix to start
@@ -588,11 +643,13 @@ function startTracking() {
   isTracking = true;
 
   if (map && geolocate) {
+    hookMapCameraDisengage();
     attachGeoWatch();
     try { geolocate.trigger(); } catch {}
   } else {
     const once = () => {
       map.off('load', once);
+      hookMapCameraDisengage();
       if (geolocate) {
         attachGeoWatch();
         try { geolocate.trigger(); } catch {}
@@ -622,9 +679,9 @@ function stopTracking() {
   isTracking = false;
 }
 
-// ================================
+// ===========================================
 // Navigation (builds a full route once)
-// ================================
+// ===========================================
 async function startNavigationToProperty(property) {
   if (!property) return toastError('Select a destination.');
 
@@ -634,12 +691,15 @@ async function startNavigationToProperty(property) {
     return;
   }
 
-  // reset nav state
+  // Reset nav state
   stopNavigation(false);
   isNavigating = true;
   hasNearAlertFired = false;
   hasArrivedOnce = false;
   selectedProperty = property;
+
+  // Start in ROUTE view (not strict follow)
+  setCameraMode('route');
 
   try {
     const userCoords = [userLocation.lng, userLocation.lat];
@@ -711,8 +771,11 @@ async function startNavigationToProperty(property) {
     currentRoute = { coordinates: dedupeCoords(routeCoords), distance: totalDistance, steps: navigationSteps };
     prepareFollowLayers();     // add sources/layers (remaining + traveled)
     updateFollowRendering();   // initial split
-    startNavigationTick();     // start HUD/proximity updater
+
+    // Fit once to the route (route view) and DON'T snap to user each fix
     fitBoundsToRoute();
+
+    startNavigationTick();     // HUD/proximity updater
     checkProximityNow();
   } catch (e) {
     console.error('Navigation error', e);
@@ -730,9 +793,10 @@ async function rerouteToCurrentDestination() {
 
   try {
     const temp = selectedProperty;
-    // keep UI calm—no state wipe animations, just rebuild
     await startNavigationToProperty({ ...temp });
     toastSuccess('Rerouting…');
+    // Stay in 'route' mode after reroute
+    setCameraMode('route');
   } catch (e) {
     console.error('Reroute failed', e);
   }
@@ -752,7 +816,6 @@ function startNavigationTick() {
     distanceToDestination = calculateRemainingDistance(closestIndex);
     currentStep = getCurrentStepByDistance(traveled, total, currentRoute.steps);
 
-    // keep follow polyline fresh
     updateFollowRendering();
     checkProximityNow();
   }, 1000);
@@ -774,7 +837,9 @@ function stopNavigation(clearDest = true) {
   if (clearDest) clearPointSource(DEST_SRC);
   currentRoute = null;
   hasNearAlertFired = false;
-  // hasArrivedOnce guarded until a new nav starts.
+
+  // When nav ends, leave camera in 'free' (no strict follow)
+  setCameraMode('free');
 }
 
 function completeNavigation() {
@@ -786,6 +851,7 @@ function completeNavigation() {
     confirmText: 'Yes, guide me',
     cancelText: 'No, stay here',
     onConfirm: () => {
+      // On the next nav (to gate), we will start in 'route' mode again (not strict follow)
       window.location.replace('/graves/Main%20Gate');
     },
     onCancel: () => {
@@ -794,11 +860,10 @@ function completeNavigation() {
   });
 }
 
-// ================================
-// FOLLOW LOGIC (split traveled/remaining)
-// ================================
+// ===========================================
+// FOLLOW LOGIC (split traveled/remaining) — unchanged
+// ===========================================
 function prepareFollowLayers() {
-  // Add/update GeoJSON sources for remaining + traveled
   const ensureSource = (id) => {
     if (map.getSource(id)) return;
     map.addSource(id, { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: [] } } });
@@ -806,7 +871,6 @@ function prepareFollowLayers() {
   ensureSource('route-remaining');
   ensureSource('route-traveled');
 
-  // Layers
   if (!map.getLayer('route-remaining')) {
     map.addLayer({
       id: 'route-remaining',
@@ -838,11 +902,8 @@ function updateFollowRendering() {
   if (!currentRoute || !userLocation) return;
 
   const userPt = [userLocation.lng, userLocation.lat];
-
-  // Find closest segment on the route and split there
   const { closestIndex } = findClosestPointOnRoute(userPt, currentRoute.coordinates);
 
-  // Compute exact snapped point on that segment for a smooth split
   const segA = currentRoute.coordinates[closestIndex];
   const segB = currentRoute.coordinates[Math.min(closestIndex + 1, currentRoute.coordinates.length - 1)];
   const snap = nearestPointOnSegment(userPt, segA, segB).point;
@@ -857,7 +918,6 @@ function updateFollowRendering() {
     ...currentRoute.coordinates.slice(closestIndex + 1)
   ];
 
-  // Update sources only (no relayering)
   const setData = (id, coords) => {
     const src = map.getSource(id);
     if (!src) return;
@@ -870,16 +930,13 @@ function updateFollowRendering() {
 
 function maybeRerouteIfOffPath() {
   if (!currentRoute || !userLocation) return;
-
   const userPt = [userLocation.lng, userLocation.lat];
   const { distance: off } = nearestDistanceToPolyline(userPt, currentRoute.coordinates);
-
   if (off > OFFROUTE_THRESHOLD_M) {
     rerouteToCurrentDestination();
   }
 }
 
-// Utility: nearest distance to a linestring (in meters)
 function nearestDistanceToPolyline(point, coords) {
   let min = Infinity;
   let minIdx = 0;
@@ -897,9 +954,9 @@ function fitBoundsToRoute() {
   map.fitBounds(bounds, { padding: 100, maxZoom: 20 });
 }
 
-// ================================
+// ===========================================
 // Distance/Steps + Proximity (unchanged semantics)
-// ================================
+// ===========================================
 function calculateRemainingDistance(startIdx) {
   let d = 0;
   const coords = currentRoute.coordinates;
@@ -955,7 +1012,6 @@ function checkProximityNow() {
 
   const metric = Math.min(straight, along);
 
-  // Near alert
   const near = effectiveNearRadius();
   if (!hasNearAlertFired && metric <= near) {
     hasNearAlertFired = true;
@@ -963,347 +1019,347 @@ function checkProximityNow() {
     try { navigator.vibrate?.(120); } catch {}
   }
 
-  // Arrival
   if (metric <= ARRIVAL_THRESHOLD_M) {
     hasArrivedOnce = true;
     completeNavigation();
   }
 }
-  // ================================
-  // Internal routing (unchanged)
-  // ================================
-  function mergeRouteLegs(existing, incoming) {
-    if (!incoming?.length) return existing;
-    if (!existing.length) return [...incoming];
-    const last = existing[existing.length - 1];
-    const firstNew = incoming[0];
-    if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) existing.push(firstNew);
-    return existing.concat(incoming.slice(1));
+
+// ===========================================
+// Internal routing (unchanged)
+// ===========================================
+function mergeRouteLegs(existing, incoming) {
+  if (!incoming?.length) return existing;
+  if (!existing.length) return [...incoming];
+  const last = existing[existing.length - 1];
+  const firstNew = incoming[0];
+  if (last[0] !== firstNew[0] || last[1] !== firstNew[1]) existing.push(firstNew);
+  return existing.concat(incoming.slice(1));
+}
+
+async function navigateUsingInternalPaths(property, startPoint) {
+  if (!lineStringFeatures?.length) throw new Error('No internal paths available');
+
+  let bestStart = null, bestDest = null;
+  for (const f of lineStringFeatures) {
+    const ns = nearestOnLine([startPoint.lng, startPoint.lat], f.coordinates);
+    const nd = nearestOnLine([property.lng, property.lat], f.coordinates);
+    if (!bestStart || ns.distance < bestStart.distance) bestStart = { ...ns, feature: f };
+    if (!bestDest  || nd.distance  < bestDest.distance)  bestDest  = { ...nd, feature: f };
   }
 
-  async function navigateUsingInternalPaths(property, startPoint) {
-    if (!lineStringFeatures?.length) throw new Error('No internal paths available');
+  let chain = [];
 
-    let bestStart = null, bestDest = null;
-    for (const f of lineStringFeatures) {
-      const ns = nearestOnLine([startPoint.lng, startPoint.lat], f.coordinates);
-      const nd = nearestOnLine([property.lng, property.lat], f.coordinates);
-      if (!bestStart || ns.distance < bestStart.distance) bestStart = { ...ns, feature: f };
-      if (!bestDest  || nd.distance  < bestDest.distance)  bestDest  = { ...nd, feature: f };
-    }
+  if (bestStart.feature.id === bestDest.feature.id) {
+    const C = bestStart.feature.coordinates.slice();
 
-    let chain = [];
+    const sIdx0 = bestStart.index;
+    const dIdx0 = bestDest.index + (bestDest.index >= sIdx0 ? 1 : 0);
+    C.splice(sIdx0 + 1, 0, bestStart.point);
+    C.splice(dIdx0 + 1, 0, bestDest.point);
 
-    if (bestStart.feature.id === bestDest.feature.id) {
-      const C = bestStart.feature.coordinates.slice();
+    const si = nearestRouteIndexOnCoords(bestStart.point, C);
+    const di = nearestRouteIndexOnCoords(bestDest.point, C);
+    const seg = si <= di ? C.slice(si, di + 1) : C.slice(di, si + 1).reverse();
 
-      const sIdx0 = bestStart.index;
-      const dIdx0 = bestDest.index + (bestDest.index >= sIdx0 ? 1 : 0);
-      C.splice(sIdx0 + 1, 0, bestStart.point);
-      C.splice(dIdx0 + 1, 0, bestDest.point);
+    chain = seg;
+  } else {
+    const { edges, nid } = buildEndpointGraph(lineStringFeatures, 10);
 
-      const si = nearestRouteIndexOnCoords(bestStart.point, C);
-      const di = nearestRouteIndexOnCoords(bestDest.point, C);
-      const seg = si <= di ? C.slice(si, di + 1) : C.slice(di, si + 1).reverse();
+    const sFeat = bestStart.feature.coordinates;
+    const dFeat = bestDest.feature.coordinates;
+    const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
+    const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
 
-      chain = seg;
-    } else {
-      const { edges, nid } = buildEndpointGraph(lineStringFeatures, 10);
+    const sNode = sEnds.reduce((a, b) =>
+      calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a
+    );
+    const dNode = dEnds.reduce((a, b) =>
+      calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a
+    );
 
-      const sFeat = bestStart.feature.coordinates;
-      const dFeat = bestDest.feature.coordinates;
-      const sEnds = [sFeat[0], sFeat[sFeat.length - 1]];
-      const dEnds = [dFeat[0], dFeat[dFeat.length - 1]];
+    const nodePath = dijkstra(edges, nid(sNode), nid(dNode));
+    if (!nodePath.length) throw new Error('No connecting internal path between segments');
 
-      const sNode = sEnds.reduce((a, b) =>
-        calculateDistance(bestStart.point, b) < calculateDistance(bestStart.point, a) ? b : a
-      );
-      const dNode = dEnds.reduce((a, b) =>
-        calculateDistance(bestDest.point, b) < calculateDistance(bestDest.point, a) ? b : a
-      );
+    const nodeChain = nodePath.map(id => id.split(',').map(Number));
 
-      const nodePath = dijkstra(edges, nid(sNode), nid(dNode));
-      if (!nodePath.length) throw new Error('No connecting internal path between segments');
+    const sIdx = nearestRouteIndexOnCoords(bestStart.point, sFeat);
+    const sNodeIdx = nearestRouteIndexOnCoords(sNode, sFeat);
+    const sSeg = sIdx <= sNodeIdx ? sFeat.slice(sIdx, sNodeIdx + 1) : sFeat.slice(sNodeIdx, sIdx + 1).reverse();
 
-      const nodeChain = nodePath.map(id => id.split(',').map(Number));
+    const dIdx = nearestRouteIndexOnCoords(bestDest.point, dFeat);
+    const dNodeIdx = nearestRouteIndexOnCoords(dNode, dFeat);
+    const dSeg = dNodeIdx <= dIdx ? dFeat.slice(dNodeIdx, dIdx + 1) : dFeat.slice(dIdx, dNodeIdx + 1).reverse();
 
-      const sIdx = nearestRouteIndexOnCoords(bestStart.point, sFeat);
-      const sNodeIdx = nearestRouteIndexOnCoords(sNode, sFeat);
-      const sSeg = sIdx <= sNodeIdx ? sFeat.slice(sIdx, sNodeIdx + 1) : sFeat.slice(sNodeIdx, sIdx + 1).reverse();
-
-      const dIdx = nearestRouteIndexOnCoords(bestDest.point, dFeat);
-      const dNodeIdx = nearestRouteIndexOnCoords(dNode, dFeat);
-      const dSeg = dNodeIdx <= dIdx ? dFeat.slice(dNodeIdx, dIdx + 1) : dFeat.slice(dIdx, dNodeIdx + 1).reverse();
-
-      chain = [bestStart.point, ...sSeg.slice(1), ...nodeChain, ...dSeg.slice(1), bestDest.point];
-    }
-
-    const head = [startPoint.lng, startPoint.lat];
-    const tail = [property.lng, property.lat];
-
-    if (!almostEqualCoord(head, chain[0])) chain = [head, ...chain];
-    if (!almostEqualCoord(chain[chain.length - 1], tail)) chain = [...chain, tail];
-
-    chain = dedupeCoords(chain);
-
-    selectedLineString = { id: 'internal', coordinates: chain };
-
-    map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
-    map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
-    map.setPaintProperty('cemetery-paths', 'line-width', 2);
+    chain = [bestStart.point, ...sSeg.slice(1), ...nodeChain, ...dSeg.slice(1), bestDest.point];
   }
 
-  function nearestOnLine(point, coords) {
-    let best = { point: coords[0], index: 0, distance: Infinity };
-    for (let i = 0; i < coords.length - 1; i++) {
-      const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
-      if (proj.distance < best.distance) best = { point: proj.point, index: i, distance: proj.distance };
+  const head = [startPoint.lng, startPoint.lat];
+  const tail = [property.lng, property.lat];
+
+  if (!almostEqualCoord(head, chain[0])) chain = [head, ...chain];
+  if (!almostEqualCoord(chain[chain.length - 1], tail)) chain = [...chain, tail];
+
+  chain = dedupeCoords(chain);
+
+  selectedLineString = { id: 'internal', coordinates: chain };
+
+  map.setPaintProperty('cemetery-paths', 'line-opacity', 0);
+  map.setPaintProperty('cemetery-paths', 'line-color', '#ef4444');
+  map.setPaintProperty('cemetery-paths', 'line-width', 2);
+}
+
+function nearestOnLine(point, coords) {
+  let best = { point: coords[0], index: 0, distance: Infinity };
+  for (let i = 0; i < coords.length - 1; i++) {
+    const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
+    if (proj.distance < best.distance) best = { point: proj.point, index: i, distance: proj.distance };
+  }
+  return best;
+}
+
+function calculatePathDistance(coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return 0;
+  let d = 0;
+  for (let i = 0; i < coordinates.length - 1; i++) {
+    d += calculateDistance(coordinates[i], coordinates[i + 1]);
+  }
+  return d;
+}
+
+function createInternalSteps(coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return [];
+  const steps = [];
+  for (let i = 0; i < coordinates.length - 1; i++) {
+    steps.push({
+      instruction: i === 0 ? 'Start on cemetery path'
+               : i === coordinates.length - 2 ? 'Arrive at destination'
+               : 'Continue on path',
+      distance: calculateDistance(coordinates[i], coordinates[i + 1]),
+    });
+  }
+  return steps;
+}
+
+function buildEndpointGraph(features, THRESHOLD = 10) {
+  const nodes = [];
+  const edges = {};
+  const nid = (c) => `${c[0]},${c[1]}`;
+  const addNode = (c) => {
+    const id = nid(c);
+    if (!edges[id]) { edges[id] = []; nodes.push({ id, coord: c }); }
+    return id;
+  };
+  for (const f of features) {
+    const C = f.coordinates;
+    for (let i = 0; i < C.length; i++) {
+      const a = C[i], aid = addNode(a);
+      if (i < C.length - 1) {
+        const b = C[i + 1], bid = addNode(b);
+        const w = calculateDistance(a, b);
+        edges[aid].push({ to: bid, weight: w });
+        edges[bid].push({ to: aid, weight: w });
+      }
     }
-    return best;
+  }
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const d = calculateDistance(nodes[i].coord, nodes[j].coord);
+      if (d <= THRESHOLD) {
+        edges[nodes[i].id].push({ to: nodes[j].id, weight: d });
+        edges[nodes[j].id].push({ to: nodes[i].id, weight: d });
+      }
+    }
+  }
+  return { nodes, edges, nid };
+}
+
+function dijkstra(edges, startId, endId) {
+  const dist = new Map(), prev = new Map();
+  const Q = new Set(Object.keys(edges));
+  for (const k of Q) dist.set(k, Infinity);
+  dist.set(startId, 0);
+
+  while (Q.size) {
+    let u = null, best = Infinity;
+    for (const k of Q) {
+      const d = dist.get(k);
+      if (d < best) { best = d; u = k; }
+    }
+    if (u === null) break;
+    Q.delete(u);
+    if (u === endId) break;
+
+    for (const e of edges[u]) {
+      const alt = dist.get(u) + e.weight;
+      if (alt < dist.get(e.to)) {
+        dist.set(e.to, alt);
+        prev.set(e.to, u);
+      }
+    }
   }
 
-  function calculatePathDistance(coordinates) {
-    if (!Array.isArray(coordinates) || coordinates.length < 2) return 0;
-    let d = 0;
-    for (let i = 0; i < coordinates.length - 1; i++) {
-      d += calculateDistance(coordinates[i], coordinates[i + 1]);
-    }
-    return d;
+  const path = [];
+  let cur = endId;
+  if (!prev.has(cur) && cur !== startId) return [];
+  while (cur) {
+    path.push(cur);
+    if (cur === startId) break;
+    cur = prev.get(cur);
   }
+  return path.reverse();
+}
 
-  function createInternalSteps(coordinates) {
-    if (!Array.isArray(coordinates) || coordinates.length < 2) return [];
-    const steps = [];
-    for (let i = 0; i < coordinates.length - 1; i++) {
-      steps.push({
-        instruction: i === 0 ? 'Start on cemetery path'
-                 : i === coordinates.length - 2 ? 'Arrive at destination'
-                 : 'Continue on path',
-        distance: calculateDistance(coordinates[i], coordinates[i + 1]),
-      });
-    }
-    return steps;
+function nearestRouteIndexOnCoords(pt, coords) {
+  let best = 0, md = Infinity;
+  for (let i = 0; i < coords.length; i++) {
+    const d = calculateDistance(pt, coords[i]);
+    if (d < md) { md = d; best = i; }
   }
+  return best;
+}
 
-  function buildEndpointGraph(features, THRESHOLD = 10) {
-    const nodes = [];
-    const edges = {};
-    const nid = (c) => `${c[0]},${c[1]}`;
-    const addNode = (c) => {
-      const id = nid(c);
-      if (!edges[id]) { edges[id] = []; nodes.push({ id, coord: c }); }
-      return id;
+function findClosestPointOnRoute(point, coords) {
+  let closestIndex = 0, minD = Infinity;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
+    if (proj.distance < minD) { minD = proj.distance; closestIndex = i; }
+  }
+  return { closestIndex, distance: minD };
+}
+
+// ===========================================
+// External routing
+// ===========================================
+async function getMapboxDirections(start, end) {
+  const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data.routes?.length) {
+    const r = data.routes[0];
+    return {
+      coordinates: r.geometry.coordinates,
+      distance: r.distance,
+      steps: r.legs?.[0]?.steps?.map((s) => ({
+        instruction: s.maneuver?.instruction ?? 'Continue',
+        distance: s.distance ?? 0
+      })) ?? []
     };
-    for (const f of features) {
-      const C = f.coordinates;
-      for (let i = 0; i < C.length; i++) {
-        const a = C[i], aid = addNode(a);
-        if (i < C.length - 1) {
-          const b = C[i + 1], bid = addNode(b);
-          const w = calculateDistance(a, b);
-          edges[aid].push({ to: bid, weight: w });
-          edges[bid].push({ to: aid, weight: w });
-        }
-      }
-    }
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const d = calculateDistance(nodes[i].coord, nodes[j].coord);
-        if (d <= THRESHOLD) {
-          edges[nodes[i].id].push({ to: nodes[j].id, weight: d });
-          edges[nodes[j].id].push({ to: nodes[i].id, weight: d });
-        }
-      }
-    }
-    return { nodes, edges, nid };
   }
+  throw new Error('No route found');
+}
 
-  function dijkstra(edges, startId, endId) {
-    const dist = new Map(), prev = new Map();
-    const Q = new Set(Object.keys(edges));
-    for (const k of Q) dist.set(k, Infinity);
-    dist.set(startId, 0);
-
-    while (Q.size) {
-      let u = null, best = Infinity;
-      for (const k of Q) {
-        const d = dist.get(k);
-        if (d < best) { best = d; u = k; }
-      }
-      if (u === null) break;
-      Q.delete(u);
-      if (u === endId) break;
-
-      for (const e of edges[u]) {
-        const alt = dist.get(u) + e.weight;
-        if (alt < dist.get(e.to)) {
-          dist.set(e.to, alt);
-          prev.set(e.to, u);
-        }
-      }
-    }
-
-    const path = [];
-    let cur = endId;
-    if (!prev.has(cur) && cur !== startId) return [];
-    while (cur) {
-      path.push(cur);
-      if (cur === startId) break;
-      cur = prev.get(cur);
-    }
-    return path.reverse();
+// ===========================================
+// Helpers (unchanged)
+// ===========================================
+function getCemeteryBoundary() {
+  return [
+    [120.975, 14.470],
+    [120.978, 14.470],
+    [120.978, 14.473],
+    [120.975, 14.473],
+    [120.975, 14.470]
+  ];
+}
+function pointInPolygon(point, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0], yi = polygon[i][1];
+    const xj = polygon[j][0], yj = polygon[j][1];
+    const intersect = ((yi > point[1]) !== (yj > point[1])) &&
+      (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
+    if (intersect) inside = !inside;
   }
+  return inside;
+}
 
-  function nearestRouteIndexOnCoords(pt, coords) {
-    let best = 0, md = Infinity;
-    for (let i = 0; i < coords.length; i++) {
-      const d = calculateDistance(pt, coords[i]);
-      if (d < md) { md = d; best = i; }
-    }
-    return best;
+function findNearestEntrance(fromPoint = null) {
+  if (!fromPoint) return ENTRANCES[0];
+  let best = ENTRANCES[0], md = Infinity;
+  for (const e of ENTRANCES) {
+    const d = calculateDistance([fromPoint.lng, fromPoint.lat], [e.lng, e.lat]);
+    if (d < md) { md = d; best = e; }
   }
+  return best;
+}
 
-  function findClosestPointOnRoute(point, coords) {
-    let closestIndex = 0, minD = Infinity;
-    for (let i = 0; i < coords.length - 1; i++) {
-      const proj = nearestPointOnSegment(point, coords[i], coords[i + 1]);
-      if (proj.distance < minD) { minD = proj.distance; closestIndex = i; }
-    }
-    return { closestIndex, distance: minD };
+function calculateDistance(a, b) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const [lng1, lat1] = a, [lng2, lat2] = b;
+  const R = 6371e3;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const la1 = toRad(lat1), la2 = toRad(lat2);
+  const x = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+function almostEqualCoord(a, b, epsDeg = 1e-6) {
+  if (!a || !b) return false;
+  return Math.abs(a[0] - b[0]) < epsDeg && Math.abs(a[1] - b[1]) < epsDeg;
+}
+
+function dedupeCoords(arr, epsDeg = 1e-6) {
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const c of arr) {
+    if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) out.push(c);
   }
+  return out;
+}
 
-  // ================================
-  // External routing
-  // ================================
-  async function getMapboxDirections(start, end) {
-    const url = `https://api.mapbox.com/directions/v5/mapbox/walking/${start[0]},${start[1]};${end[0]},${end[1]}?steps=true&geometries=geojson&access_token=${mapboxgl.accessToken}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    if (data.routes?.length) {
-      const r = data.routes[0];
-      return {
-        coordinates: r.geometry.coordinates,
-        distance: r.distance,
-        steps: r.legs?.[0]?.steps?.map((s) => ({
-          instruction: s.maneuver?.instruction ?? 'Continue',
-          distance: s.distance ?? 0
-        })) ?? []
-      };
-    }
-    throw new Error('No route found');
+function nearestPointOnSegment(p, a, b) {
+  const A = p[0] - a[0];
+  const B = p[1] - a[1];
+  const C = b[0] - a[0];
+  const D = b[1] - a[1];
+
+  const dot = A * C + B * D;
+  const lenSq = C * C + D * D;
+  if (lenSq === 0) return { point: a, distance: calculateDistance(p, a) };
+
+  let t = dot / lenSq;
+  t = Math.max(0, Math.min(1, t));
+
+  const proj = [a[0] + t * C, a[1] + t * D];
+  return { point: proj, distance: calculateDistance(p, proj) };
+}
+
+function toastSuccess(message) {
+  successMessage = message;
+  setTimeout(() => { if (successMessage === message) successMessage = null; }, 3000);
+  console.log('[OK]', message);
+}
+function toastError(message) {
+  errorMessage = message;
+  setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
+  console.error('[ERR]', message);
+}
+
+function showConfirmation({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
+  showExitPopup = { title, message, confirmText, cancelText, onConfirm, onCancel };
+}
+
+// ===========================================
+// UI Handlers (unchanged)
+// ===========================================
+function handleSearchInput(e) {
+  const val = (e?.target?.value ?? '').toString();
+  matchName = val;
+  if (!val.trim()) return;
+  const exact = getFeatureByName(val);
+  if (exact) selectedProperty = exact;
+}
+
+function goNavigate() {
+  if (!selectedProperty) {
+    const p = getFeatureByName(matchName);
+    if (!p) return toastError(`Block "${matchName}" not found.`);
+    selectedProperty = p;
   }
-
-  // ================================
-  // Helpers
-  // ================================
-  function getCemeteryBoundary() {
-    return [
-      [120.975, 14.470],
-      [120.978, 14.470],
-      [120.978, 14.473],
-      [120.975, 14.473],
-      [120.975, 14.470]
-    ];
-  }
-  function pointInPolygon(point, polygon) {
-    let inside = false;
-    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
-      const xi = polygon[i][0], yi = polygon[i][1];
-      const xj = polygon[j][0], yj = polygon[j][1];
-      const intersect = ((yi > point[1]) !== (yj > point[1])) &&
-        (point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi);
-      if (intersect) inside = !inside;
-    }
-    return inside;
-  }
-
-  function findNearestEntrance(fromPoint = null) {
-    if (!fromPoint) return ENTRANCES[0];
-    let best = ENTRANCES[0], md = Infinity;
-    for (const e of ENTRANCES) {
-      const d = calculateDistance([fromPoint.lng, fromPoint.lat], [e.lng, e.lat]);
-      if (d < md) { md = d; best = e; }
-    }
-    return best;
-  }
-
-  function calculateDistance(a, b) {
-    const toRad = (deg) => deg * Math.PI / 180;
-    const [lng1, lat1] = a, [lng2, lat2] = b;
-    const R = 6371e3;
-    const dLat = toRad(lat2 - lat1);
-    const dLng = toRad(lng2 - lng1);
-    const la1 = toRad(lat1), la2 = toRad(lat2);
-    const x = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
-  }
-
-  function almostEqualCoord(a, b, epsDeg = 1e-6) {
-    if (!a || !b) return false;
-    return Math.abs(a[0] - b[0]) < epsDeg && Math.abs(a[1] - b[1]) < epsDeg;
-  }
-
-  function dedupeCoords(arr, epsDeg = 1e-6) {
-    if (!Array.isArray(arr)) return [];
-    const out = [];
-    for (const c of arr) {
-      if (!out.length || !almostEqualCoord(out[out.length - 1], c, epsDeg)) out.push(c);
-    }
-    return out;
-  }
-
-  function nearestPointOnSegment(p, a, b) {
-    const A = p[0] - a[0];
-    const B = p[1] - a[1];
-    const C = b[0] - a[0];
-    const D = b[1] - a[1];
-
-    const dot = A * C + B * D;
-    const lenSq = C * C + D * D;
-    if (lenSq === 0) return { point: a, distance: calculateDistance(p, a) };
-
-    let t = dot / lenSq;
-    t = Math.max(0, Math.min(1, t));
-
-    const proj = [a[0] + t * C, a[1] + t * D];
-    return { point: proj, distance: calculateDistance(p, proj) };
-  }
-
-  function toastSuccess(message) {
-    successMessage = message;
-    setTimeout(() => { if (successMessage === message) successMessage = null; }, 3000);
-    console.log('[OK]', message);
-  }
-  function toastError(message) {
-    errorMessage = message;
-    setTimeout(() => { if (errorMessage === message) errorMessage = null; }, 5000);
-    console.error('[ERR]', message);
-  }
-
-  function showConfirmation({ title, message, confirmText, cancelText, onConfirm, onCancel }) {
-    showExitPopup = { title, message, confirmText, cancelText, onConfirm, onCancel };
-  }
-
-  // ================================
-  // UI Handlers
-  // ================================
-  function handleSearchInput(e) {
-    const val = (e?.target?.value ?? '').toString();
-    matchName = val;
-    if (!val.trim()) return;
-    const exact = getFeatureByName(val);
-    if (exact) selectedProperty = exact;
-  }
-
-  function goNavigate() {
-    if (!selectedProperty) {
-      const p = getFeatureByName(matchName);
-      if (!p) return toastError(`Block "${matchName}" not found.`);
-      selectedProperty = p;
-    }
-    goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
-    startNavigationToProperty(selectedProperty);
-  }
+  goto(`/graves/${encodeURIComponent(selectedProperty.name)}`);
+  startNavigationToProperty(selectedProperty);
+}
 </script>
 
 
